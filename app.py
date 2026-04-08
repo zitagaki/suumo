@@ -3,6 +3,7 @@ import random
 import requests
 import re
 import pandas as pd
+import io
 from lxml import html
 from urllib.parse import urljoin
 from selenium import webdriver
@@ -222,7 +223,7 @@ def main():
             # プログレスバーを更新（0.0 ~ 1.0 の割合）
             progress_bar.progress(idx / total_urls)
 
-        # --- フェーズ3：CSV保存とダウンロードボタン表示 ---
+            # --- フェーズ3：Excel保存とダウンロードボタン表示 ---
         if all_properties_data:
             st.success("🎉 すべてのデータ抽出が完了しました！")
             
@@ -232,13 +233,17 @@ def main():
             st.write("▼ 抽出結果プレビュー")
             st.dataframe(df.head(5)) 
             
-            # CSVダウンロードボタンの作成
-            csv = df.to_csv(index=False, encoding="utf-8-sig")
+            # Excelデータに変換してメモリ上に保持
+            excel_buffer = io.BytesIO()
+            df.to_excel(excel_buffer, index=False, engine="openpyxl")
+            excel_data = excel_buffer.getvalue()
+
+            # Excelダウンロードボタンの作成
             st.download_button(
-                label="📥 抽出したCSVデータをダウンロード",
-                data=csv,
-                file_name="suumo_properties.csv",
-                mime="text/csv"
+                label="📥 抽出したデータをExcelでダウンロード",
+                data=excel_data,
+                file_name="suumo_properties.xlsx",  # 拡張子を .xlsx に変更
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
             st.error("保存できるデータがありませんでした。")
