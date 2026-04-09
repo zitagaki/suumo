@@ -16,7 +16,7 @@ import streamlit as st
 from sklearn.linear_model import LinearRegression
 
 # =========================================================
-# 1. データ抽出関数
+# 1. データ抽出関数（設備データ取得・完全復活版）
 # =========================================================
 def scrape_suumo_refined(url):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
@@ -32,6 +32,7 @@ def scrape_suumo_refined(url):
         "管理費・共益費": '//*[@id="js-view_gallery"]/div/div[2]/div[2]/div/div[2]/div/div[1]/div/div[2]/div/div[2]/text()',
         "間取り": '//*[@id="js-view_gallery"]/div/div[2]/div[3]/div[1]/div/div[2]/ul/li[1]/div/div[2]/text()',
         "専有面積": '//*[@id="js-view_gallery"]/div/div[2]/div[3]/div[1]/div/div[2]/ul/li[2]/div/div[2]/text()',
+        "建物種別": '//*[@id="js-view_gallery"]/div/div[2]/div[3]/div[1]/div/div[2]/ul/li[4]/div/div[2]/text()',
         "築年数": '//*[@id="js-view_gallery"]/div/div[2]/div[3]/div[1]/div/div[2]/ul/li[5]/div/div[2]/text()',
     }
 
@@ -46,6 +47,7 @@ def scrape_suumo_refined(url):
         else:
             property_data[key] = "-"
 
+    # 交通アクセス
     for i in range(1, 4):
         transport_path = f'//*[@id="js-view_gallery"]/div/div[2]/div[3]/div[2]/div[1]/div/div[2]/div[{i}]//text()'
         transport_elements = tree.xpath(transport_path)
@@ -60,6 +62,13 @@ def scrape_suumo_refined(url):
             else:
                 property_data[f"徒歩{i}"] = "-"
 
+    # ★復活：部屋の特徴・設備の取得
+    features_path = '//*[@id="bkdt-option"]/div/ul/li/text()'
+    feature_elements = tree.xpath(features_path)
+    if feature_elements:
+        property_data["部屋の特徴・設備"] = "、".join([f.strip() for f in feature_elements if f.strip()])
+
+    # 下部テーブル
     tables = tree.xpath('//table')
     for table in tables:
         rows = table.xpath('.//tr')
@@ -74,7 +83,6 @@ def scrape_suumo_refined(url):
                         property_data[key] = value
 
     return property_data
-
 
 # =========================================================
 # 2. データクレンジング関数（エラー対策・フラグ化対応版）
