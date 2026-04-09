@@ -259,7 +259,7 @@ def main():
                     return f'color: {color}'
 
                 st.dataframe(
-                    coef_df.style.applymap(color_negative_red, subset=['影響額（円）']),
+                    coef_df.style.map(color_negative_red, subset=['影響額（円）']),
                     use_container_width=True
                 )
                 # ========================================================
