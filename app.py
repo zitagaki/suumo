@@ -16,7 +16,7 @@ import streamlit as st
 from sklearn.linear_model import LinearRegression
 
 # =========================================================
-# 1. データ抽出関数（設備データ取得・完全復活版）
+# 1. データ抽出関数（変更なし）
 # =========================================================
 def scrape_suumo_refined(url):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
@@ -29,10 +29,8 @@ def scrape_suumo_refined(url):
     xpath_dict = {
         "物件名": '//*[@id="wrapper"]/div[3]/div[1]/h1/text()',
         "家賃": '//*[@id="js-view_gallery"]/div/div[2]/div[2]/div/div[2]/div/div[1]/div/div[1]/text()',
-        "管理費・共益費": '//*[@id="js-view_gallery"]/div/div[2]/div[2]/div/div[2]/div/div[1]/div/div[2]/div/div[2]/text()',
         "間取り": '//*[@id="js-view_gallery"]/div/div[2]/div[3]/div[1]/div/div[2]/ul/li[1]/div/div[2]/text()',
         "専有面積": '//*[@id="js-view_gallery"]/div/div[2]/div[3]/div[1]/div/div[2]/ul/li[2]/div/div[2]/text()',
-        "建物種別": '//*[@id="js-view_gallery"]/div/div[2]/div[3]/div[1]/div/div[2]/ul/li[4]/div/div[2]/text()',
         "築年数": '//*[@id="js-view_gallery"]/div/div[2]/div[3]/div[1]/div/div[2]/ul/li[5]/div/div[2]/text()',
     }
 
@@ -47,7 +45,6 @@ def scrape_suumo_refined(url):
         else:
             property_data[key] = "-"
 
-    # 交通アクセス
     for i in range(1, 4):
         transport_path = f'//*[@id="js-view_gallery"]/div/div[2]/div[3]/div[2]/div[1]/div/div[2]/div[{i}]//text()'
         transport_elements = tree.xpath(transport_path)
@@ -62,13 +59,6 @@ def scrape_suumo_refined(url):
             else:
                 property_data[f"徒歩{i}"] = "-"
 
-    # ★復活：部屋の特徴・設備の取得
-    features_path = '//*[@id="bkdt-option"]/div/ul/li/text()'
-    feature_elements = tree.xpath(features_path)
-    if feature_elements:
-        property_data["部屋の特徴・設備"] = "、".join([f.strip() for f in feature_elements if f.strip()])
-
-    # 下部テーブル
     tables = tree.xpath('//table')
     for table in tables:
         rows = table.xpath('.//tr')
@@ -84,58 +74,38 @@ def scrape_suumo_refined(url):
 
     return property_data
 
+
 # =========================================================
-# 2. データクレンジング関数（エラー対策・フラグ化対応版）
+# 2. データクレンジング関数（先ほど成功した数値化処理）
 # =========================================================
 def clean_data_flexible(df):
     df_clean = df.copy()
 
     def extract_number(text, is_float=False):
-        if pd.isna(text) or str(text) == "-": return np.nan
-        if "新築" in str(text): return 0
+        if pd.isna(text) or text == "-":
+            return np.nan
+        if "新築" in str(text):
+            return 0
         match = re.search(r'([0-9\.]+)', str(text).replace(',', ''))
         if match:
-            return float(match.group(1)) if is_float else int(float(match.group(1)))
+            num_str = match.group(1)
+            return float(num_str) if is_float else int(float(num_str))
         return np.nan
 
+    def extract_rent(text):
+        val = extract_number(text, is_float=True)
+        return int(val * 10000) if pd.notna(val) else np.nan
+
     if '家賃' in df_clean.columns:
-        df_clean['家賃_数値'] = df_clean['家賃'].apply(lambda x: int(extract_number(x, True) * 10000) if pd.notna(extract_number(x, True)) else np.nan)
-    if '管理費・共益費' in df_clean.columns:
-        df_clean['管理費_数値'] = df_clean['管理費・共益費'].apply(lambda x: extract_number(x, False) if '円' in str(x) else 0)
+        df_clean['家賃_数値'] = df_clean['家賃'].apply(extract_rent)
     if '専有面積' in df_clean.columns:
-        df_clean['面積_数値'] = df_clean['専有面積'].apply(lambda x: extract_number(x, True))
+        df_clean['面積_数値'] = df_clean['専有面積'].apply(lambda x: extract_number(x, is_float=True))
     if '築年数' in df_clean.columns:
-        df_clean['築年数_数値'] = df_clean['築年数'].apply(lambda x: extract_number(x, False))
+        df_clean['築年数_数値'] = df_clean['築年数'].apply(lambda x: extract_number(x, is_float=False))
     if '徒歩1' in df_clean.columns:
-        df_clean['徒歩_数値'] = df_clean['徒歩1'].apply(lambda x: extract_number(x, False))
+        df_clean['徒歩_数値'] = df_clean['徒歩1'].apply(lambda x: extract_number(x, is_float=False))
 
-    # --- 設備・条件のフラグ化 ---
-    def check_keyword(text, keywords):
-        if pd.isna(text): return 0
-        for kw in keywords:
-            if kw in str(text): return 1
-        return 0
-
-    # 安全策：列が存在しない場合は空文字で作成
-    for col in ['部屋の特徴・設備', '備考', '建物種別']:
-        if col not in df_clean.columns:
-            df_clean[col] = ""
-
-    facilities = df_clean['部屋の特徴・設備'].astype(str) + " " + df_clean['備考'].astype(str)
-    b_type = df_clean['建物種別'].astype(str)
-
-    df_clean['バストイレ別'] = facilities.apply(lambda x: check_keyword(x, ['バストイレ別', 'バス・トイレ別']))
-    df_clean['独立洗面台'] = facilities.apply(lambda x: check_keyword(x, ['独立洗面台', '洗面所独立']))
-    df_clean['室内洗濯機置場'] = facilities.apply(lambda x: check_keyword(x, ['室内洗濯機置場']))
-    df_clean['オートロック'] = facilities.apply(lambda x: check_keyword(x, ['オートロック']))
-    df_clean['ネット無料'] = facilities.apply(lambda x: check_keyword(x, ['インターネット無料', 'ネット無料']))
-    df_clean['ペット相談'] = facilities.apply(lambda x: check_keyword(x, ['ペット相談', 'ペット可']))
-    
-    df_clean['マンション'] = b_type.apply(lambda x: check_keyword(x, ['マンション']))
-    df_clean['木造'] = b_type.apply(lambda x: check_keyword(x, ['木造']))
-    df_clean['鉄筋コンクリート'] = b_type.apply(lambda x: check_keyword(x, ['RC', 'SRC', '鉄筋コンクリート']))
-
-    # 必須項目が欠損している行を削除
+    # 分析に必須の4項目が揃っている行だけを残す（NaNの削除）
     df_clean = df_clean.dropna(subset=['家賃_数値', '面積_数値', '築年数_数値', '徒歩_数値'])
     return df_clean
 
@@ -145,9 +115,13 @@ def clean_data_flexible(df):
 # =========================================================
 def main():
     st.title("🏡 不動産データ収集 ＆ AI賃料査定システム")
+    
+    # タブの作成
     tab1, tab2 = st.tabs(["📊 データ収集 (スクレイピング)", "🤖 AI賃料査定 (重回帰分析)"])
 
-    # --- タブ1：スクレイピング機能 ---
+    # -----------------------------------------------------
+    # タブ1：スクレイピング機能（今までの機能）
+    # -----------------------------------------------------
     with tab1:
         st.write("一覧ページのURLを入力して実行ボタンを押すと、自動でデータを抽出してExcel化します。")
         target_list_url = st.text_input("SUUMOの一覧ページのURLを入力:", placeholder="https://suumo.jp/...")
@@ -165,15 +139,18 @@ def main():
                 options.add_argument('--disable-dev-shm-usage')
                 options.add_argument('--disable-gpu')
                 
+                # Cloud環境用
                 try:
                     service = Service('/usr/bin/chromedriver')
                     driver = webdriver.Chrome(service=service, options=options)
                 except:
+                    # ローカル環境用フォールバック
                     driver = webdriver.Chrome(options=options)
                 
                 try:
                     driver.get(target_list_url)
                     time.sleep(3)
+                    
                     all_detail_urls = []
                     page_count = 1
                     
@@ -232,108 +209,66 @@ def main():
                         df.to_excel(excel_buffer, index=False, engine="openpyxl")
                         st.download_button("📥 データをExcelでダウンロード", data=excel_buffer.getvalue(), file_name="suumo_properties.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-    # --- タブ2：AI賃料査定機能 ---
+
+    # -----------------------------------------------------
+    # タブ2：AI賃料査定機能（新規追加）
+    # -----------------------------------------------------
     with tab2:
-        st.write("抽出したExcelデータをアップロードして、AIによる詳細な賃料査定を行います。")
-        uploaded_file = st.file_uploader("タブ1でダウンロードしたExcelファイルをアップロード", type=["xlsx"])
+        st.write("抽出したExcelデータをアップロードして、AIによる賃料査定を行います。")
+        
+        # 1. データのアップロード
+        uploaded_file = st.file_uploader("タブ1でダウンロードしたExcelファイルをアップロードしてください", type=["xlsx"])
         
         if uploaded_file is not None:
+            # データの読み込みとクレンジング
             raw_df = pd.read_excel(uploaded_file)
             st.info("データを読み込み、AIが学習できる数値に変換しています...")
             df_ml = clean_data_flexible(raw_df)
             
             if len(df_ml) < 10:
-                st.error("分析に使用できるデータが少なすぎます。")
+                st.error("分析に使用できるデータが少なすぎます（10件以上必要です）。別のデータをアップロードしてください。")
             else:
                 st.success(f"学習準備完了！ 有効データ数: {len(df_ml)} 件")
                 
-                # AIに学習させる項目のリスト
-                feature_cols = [
-                    '面積_数値', '築年数_数値', '徒歩_数値', 
-                    'バストイレ別', '独立洗面台', '室内洗濯機置場', 
-                    'オートロック', 'ネット無料', 'ペット相談', 
-                    'マンション', '木造', '鉄筋コンクリート'
-                ]
-                
-                # 実際にデータに存在する列だけを使う
-                valid_features = [col for col in feature_cols if col in df_ml.columns]
-                
-                X = df_ml[valid_features]
+                # 2. AIモデル（重回帰分析）の学習
+                # 説明変数（原因）と 目的変数（結果）をセット
+                X = df_ml[['面積_数値', '築年数_数値', '徒歩_数値']]
                 y = df_ml['家賃_数値']
                 
-                # モデルの学習
                 model = LinearRegression()
-                model.fit(X, y)
+                model.fit(X, y) # ←ここでAIが学習しています！
                 
-                # 影響度一覧表の表示 (applymap -> map に修正済み)
                 st.markdown("---")
-                st.subheader("📊 各条件が家賃に与える影響額（AI算出）")
-                coef_df = pd.DataFrame({
-                    '査定項目': X.columns,
-                    '影響額（円）': np.round(model.coef_).astype(int)
-                }).sort_values('影響額（円）', ascending=False).reset_index(drop=True)
-
-                def color_negative_red(val):
-                    return 'color: red' if val < 0 else 'color: blue'
-                st.dataframe(coef_df.style.map(color_negative_red, subset=['影響額（円）']), use_container_width=True)
-
-                # 詳細査定シミュレーター
-                st.markdown("---")
-                st.subheader("🤖 詳細査定シミュレーター")
+                st.subheader("🤖 AI査定シミュレーター")
+                st.write("スライダーを動かすと、学習したデータをもとにリアルタイムで適正家賃を計算します。")
                 
-                # 基本設定（スライダー）
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    i_area = st.slider("専有面積 (㎡)", float(df_ml['面積_数値'].min()), float(df_ml['面積_数値'].max()), float(df_ml['面積_数値'].median()))
-                with c2:
-                    i_age = st.slider("築年数 (年)", 0, int(df_ml['築年数_数値'].max()), int(df_ml['築年数_数値'].median()))
-                with c3:
-                    i_walk = st.slider("駅徒歩 (分)", 0, int(df_ml['徒歩_数値'].max()), int(df_ml['徒歩_数値'].median()))
-
-                # 設備設定（チェックボックス）
-                st.markdown("**室内・建物設備**")
-                c4, c5, c6 = st.columns(3)
-                with c4:
-                    i_bt = st.checkbox("バストイレ別", value=True)
-                    i_wash = st.checkbox("独立洗面台", value=True)
-                with c5:
-                    i_laund = st.checkbox("室内洗濯機置場", value=True)
-                    i_net = st.checkbox("ネット無料", value=False)
-                with c6:
-                    i_auto = st.checkbox("オートロック", value=False)
-                    i_pet = st.checkbox("ペット相談", value=False)
-
-                st.markdown("**建物構造・種別**")
-                c7, c8 = st.columns(2)
-                with c7:
-                    b_type = st.radio("建物種別", ["マンション", "アパート", "その他"])
-                with c8:
-                    s_type = st.radio("構造", ["鉄筋コンクリート", "木造", "その他"])
-
-                # 予測用データの組み立て
-                input_data = []
-                for col in valid_features:
-                    if col == '面積_数値': input_data.append(i_area)
-                    elif col == '築年数_数値': input_data.append(i_age)
-                    elif col == '徒歩_数値': input_data.append(i_walk)
-                    elif col == 'バストイレ別': input_data.append(1 if i_bt else 0)
-                    elif col == '独立洗面台': input_data.append(1 if i_wash else 0)
-                    elif col == '室内洗濯機置場': input_data.append(1 if i_laund else 0)
-                    elif col == 'ネット無料': input_data.append(1 if i_net else 0)
-                    elif col == 'オートロック': input_data.append(1 if i_auto else 0)
-                    elif col == 'ペット相談': input_data.append(1 if i_pet else 0)
-                    elif col == 'マンション': input_data.append(1 if b_type == "マンション" else 0)
-                    elif col == '木造': input_data.append(1 if s_type == "木造" else 0)
-                    elif col == '鉄筋コンクリート': input_data.append(1 if s_type == "鉄筋コンクリート" else 0)
-                    else: input_data.append(0)
-
-                # 予測の実行
-                predicted_rent = model.predict([input_data])[0]
+                # 3. ユーザー入力用のUI（スライダー）
+                # 取得したデータの最大値・最小値に合わせてスライダーの範囲を自動設定
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    input_area = st.slider("専有面積 (㎡)", 
+                                           min_value=float(df_ml['面積_数値'].min()), 
+                                           max_value=float(df_ml['面積_数値'].max()), 
+                                           value=float(df_ml['面積_数値'].median()))
+                with col2:
+                    input_age = st.slider("築年数 (年)", 
+                                          min_value=0, 
+                                          max_value=int(df_ml['築年数_数値'].max()), 
+                                          value=int(df_ml['築年数_数値'].median()))
+                with col3:
+                    input_walk = st.slider("駅徒歩 (分)", 
+                                           min_value=0, 
+                                           max_value=int(df_ml['徒歩_数値'].max()), 
+                                           value=int(df_ml['徒歩_数値'].median()))
+                
+                # 4. 査定結果の計算と表示
+                # ユーザーが入力した数値をAIに渡して予測させる
+                predicted_rent = model.predict([[input_area, input_age, input_walk]])[0]
                 
                 st.markdown(
                     f"""
                     <div style="background-color:#f0f2f6;padding:20px;border-radius:10px;text-align:center;">
-                        <h3 style="margin:0;color:#333;">AI推定賃料（各種条件反映）</h3>
+                        <h3 style="margin:0;color:#333;">AIによる適正家賃（推定）</h3>
                         <h1 style="margin:0;color:#ff4b4b;font-size:48px;">{int(predicted_rent):,} 円</h1>
                     </div>
                     """, 
