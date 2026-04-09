@@ -4,3 +4,4 @@ lxml
 pandas
 selenium
 openpyxl
+scikit-learn
