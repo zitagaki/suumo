@@ -230,7 +230,7 @@ def main():
             # 【新規追加】重複データの自動クリーニング
             original_count = len(df)
             # 物件名、家賃、間取り、専有面積が全て同じものを重複とみなして、最初の1件だけ残す
-            df = df.drop_duplicates(subset=['物件名', '家賃', '間取り', '専有面積', '階数'], keep='first')
+            df = df.drop_duplicates(subset=['物件名', '家賃', '間取り', '専有面積', '階建'], keep='first')
             dedup_count = len(df)
             removed_count = original_count - dedup_count
             
