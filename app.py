@@ -230,17 +230,43 @@ def main():
             else:
                 st.success(f"学習準備完了！ 有効データ数: {len(df_ml)} 件")
                 
-                # 2. AIモデル（重回帰分析）の学習
-                # 説明変数（原因）と 目的変数（結果）をセット
-                X = df_ml[['面積_数値', '築年数_数値', '徒歩_数値']]
+# 2. AIモデル（重回帰分析）の学習
+                X = df_ml[['面積_数値', '築年数_数値', '徒歩_数値']] # 実際にはここに設備フラグ等も入ります
                 y = df_ml['家賃_数値']
                 
                 model = LinearRegression()
                 model.fit(X, y) # ←ここでAIが学習しています！
-                
+
+                # ========================================================
+                # 🌟 ここから追加：AIが算出した「係数」を表にして表示する
+                # ========================================================
+                st.markdown("---")
+                st.subheader("📊 各条件が家賃に与える影響額（参考値）")
+                st.write("アップロードされた広域データからAIが割り出した、各設備・条件の相場変動額です。")
+
+                # AIの頭脳（係数）を取り出して表（DataFrame）にする
+                coef_df = pd.DataFrame({
+                    '査定項目': X.columns,
+                    '影響額（円）': np.round(model.coef_).astype(int) # 小数点を丸めて整数に
+                })
+
+                # プラス影響が大きい順（降順）に並び替え
+                coef_df = coef_df.sort_values('影響額（円）', ascending=False).reset_index(drop=True)
+
+                # 見やすいように、プラスは青、マイナスは赤で色付けして表示
+                def color_negative_red(val):
+                    color = 'red' if val < 0 else 'blue'
+                    return f'color: {color}'
+
+                st.dataframe(
+                    coef_df.style.applymap(color_negative_red, subset=['影響額（円）']),
+                    use_container_width=True
+                )
+                # ========================================================
+
                 st.markdown("---")
                 st.subheader("🤖 AI査定シミュレーター")
-                st.write("スライダーを動かすと、学習したデータをもとにリアルタイムで適正家賃を計算します。")
+                # ...（以降は既存のスライダー表示コードへと続きます）...
                 
                 # 3. ユーザー入力用のUI（スライダー）
                 # 取得したデータの最大値・最小値に合わせてスライダーの範囲を自動設定
