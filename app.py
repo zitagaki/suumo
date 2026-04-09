@@ -108,9 +108,14 @@ def clean_data_flexible(df):
             if kw in str(text): return 1
         return 0
 
-    # 特徴や備考を結合して検索対象にする
-    facilities = df_clean.get('部屋の特徴・設備', '') + df_clean.get('備考', '')
-    b_type = df_clean.get('建物種別', '')
+    # 【エラー防止策】必要な列がExcelに存在しない場合は、空文字で列を仮作成する
+    for col in ['部屋の特徴・設備', '備考', '建物種別']:
+        if col not in df_clean.columns:
+            df_clean[col] = ""
+
+    # 文字列として安全に結合・抽出する
+    facilities = df_clean['部屋の特徴・設備'].astype(str) + " " + df_clean['備考'].astype(str)
+    b_type = df_clean['建物種別'].astype(str)
 
     df_clean['バストイレ別'] = facilities.apply(lambda x: check_keyword(x, ['バストイレ別', 'バス・トイレ別']))
     df_clean['独立洗面台'] = facilities.apply(lambda x: check_keyword(x, ['独立洗面台', '洗面所独立']))
