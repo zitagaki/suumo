@@ -223,11 +223,19 @@ def main():
             # プログレスバーを更新（0.0 ~ 1.0 の割合）
             progress_bar.progress(idx / total_urls)
 
-            # --- フェーズ3：Excel保存とダウンロードボタン表示 ---
+# --- フェーズ3：Excel保存とダウンロードボタン表示 ---
         if all_properties_data:
-            st.success("🎉 すべてのデータ抽出が完了しました！")
-            
             df = pd.DataFrame(all_properties_data)
+            
+            # 【新規追加】重複データの自動クリーニング
+            original_count = len(df)
+            # 物件名、家賃、間取り、専有面積が全て同じものを重複とみなして、最初の1件だけ残す
+            df = df.drop_duplicates(subset=['物件名', '家賃', '間取り', '専有面積', '階数'], keep='first')
+            dedup_count = len(df)
+            removed_count = original_count - dedup_count
+            
+            # 完了メッセージ（重複削除の件数も報告）
+            st.success(f"🎉 抽出完了！ (重複した {removed_count} 件を自動削除し、{dedup_count} 件の物件を抽出しました)")
             
             # 抽出したデータを画面上に少しだけプレビュー表示
             st.write("▼ 抽出結果プレビュー")
@@ -242,11 +250,10 @@ def main():
             st.download_button(
                 label="📥 抽出したデータをExcelでダウンロード",
                 data=excel_data,
-                file_name="suumo_properties.xlsx",  # 拡張子を .xlsx に変更
+                file_name="suumo_properties.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
             st.error("保存できるデータがありませんでした。")
-
 if __name__ == "__main__":
     main()
