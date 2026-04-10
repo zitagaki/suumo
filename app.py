@@ -15,10 +15,11 @@ from sklearn.linear_model import LinearRegression
 import streamlit as st
 
 # =========================================================
-# 1. データ抽出関数（Selenium完全統合）
+# 1. データ抽出関数（ブロック回避：少し長めの待機時間を設定）
 # =========================================================
 def scrape_suumo_refined(url, driver):
-    time.sleep(random.uniform(1.5, 3.0))
+    # 人間らしさを出すため、アクセス間隔をランダムにばらけさせる
+    time.sleep(random.uniform(2.0, 4.5))
     driver.get(url)
     tree = html.fromstring(driver.page_source)
     property_data = {"URL": url}
@@ -78,7 +79,6 @@ def clean_data_flexible(df):
     if '築年数' in df_clean.columns: df_clean['築年数_数値'] = df_clean['築年数'].apply(lambda x: extract_number(x, False))
     if '徒歩1' in df_clean.columns: df_clean['徒歩_数値'] = df_clean['徒歩1'].apply(lambda x: extract_number(x, False))
 
-    # 間取りグループの判定
     def get_layout_group(madori):
         m = str(madori)
         if any(x in m for x in ['1R']): return 'ワンルーム'
@@ -92,7 +92,6 @@ def clean_data_flexible(df):
     if '間取り' in df_clean.columns:
         df_clean['間取りグループ'] = df_clean['間取り'].apply(get_layout_group)
 
-    # 設備フラグ
     for col in ['部屋の特徴・設備', '備考']:
         if col not in df_clean.columns: df_clean[col] = ""
     fac = df_clean['部屋の特徴・設備'].astype(str) + " " + df_clean['備考'].astype(str)
@@ -106,17 +105,14 @@ def clean_data_flexible(df):
 # 3. カスタムルール計算エンジン
 # =========================================================
 def calc_rule_adjustments(area, walk, age, bt_flag, auto_flag, rules_dict, layout):
-    """ルール表に基づく加減算額（ハコ代以外の価値）を計算"""
     r = rules_dict.get(layout, rules_dict.get('1K・1DK', {}))
     adj = 0
     
-    # 徒歩ペナルティ
     if walk <= 10:
         adj += walk * r.get('徒歩10分以内単価', -300)
     else:
         adj += (10 * r.get('徒歩10分以内単価', -300)) + r.get('徒歩10分超固定ペナルティ', -3000) + ((walk - 10) * r.get('徒歩10分超追加単価', -100))
 
-    # 築年数ペナルティ
     if age == 0: age_unit = r.get('築年_新築単価', 150)
     elif 1 <= age <= 3: age_unit = r.get('築年_1_3年単価', 50)
     elif 4 <= age <= 6: age_unit = r.get('築年_4_6年単価', 20)
@@ -126,12 +122,10 @@ def calc_rule_adjustments(area, walk, age, bt_flag, auto_flag, rules_dict, layou
     else: age_unit = r.get('築年_31年以降', -100)
     adj += age_unit * area
 
-    # 設備ボーナス
-    if bt_flag: adj += r.get('バス・トイレ別', 3000) # rules.csvに無い場合は仮置き
+    if bt_flag: adj += r.get('バス・トイレ別', 3000)
     if auto_flag: adj += r.get('オートロック', 2000)
     
     return adj
-
 
 # =========================================================
 # 4. Streamlit メインアプリ画面
@@ -143,11 +137,17 @@ def main():
 
     with tab1:
         st.write("対象としたい駅やエリアのSUUMO一覧URLを入力し、相場の基準となるデータを収集します。")
-        target_list_url = st.text_input("SUUMOの一覧ページのURL:", placeholder="https://suumo.jp/...")
+        
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            target_list_url = st.text_input("SUUMOの一覧ページのURL:", placeholder="https://suumo.jp/...")
+        with col2:
+            # 取得ページ数の上限設定を追加
+            max_pages = st.number_input("取得する最大ページ数", min_value=1, max_value=50, value=5)
+
         if st.button("スクレイピングを実行する"):
             if target_list_url:
-                # （スクレイピングのコードは前回と同じなので省略せずそのまま維持します）
-                st.info("データ抽出を開始します...")
+                st.info("データ抽出を開始します（回遊ルート方式）...")
                 options = Options()
                 options.add_argument('--headless')
                 options.add_argument('--no-sandbox')
@@ -159,45 +159,85 @@ def main():
                     driver = webdriver.Chrome(options=options)
                 
                 all_properties_data = []
+                current_list_url = target_list_url
+                page_count = 1
+                
+                status_text = st.empty()
+                progress_bar = st.progress(0)
+                
                 try:
-                    driver.get(target_list_url)
-                    time.sleep(3)
-                    all_detail_urls = []
-                    page_count = 1
-                    
-                    while True:
-                        st.write(f"{page_count}ページ目からURLを抽出中...")
+                    # 指定したページ数まで「一覧 → 詳細 → 一覧」を繰り返す
+                    while page_count <= max_pages:
+                        status_text.info(f"【{page_count}ページ目】 の一覧からURLを収集しています...")
+                        
+                        # アクセス間隔を空ける
+                        time.sleep(random.uniform(3.0, 5.0))
+                        driver.get(current_list_url)
+                        
                         tree = html.fromstring(driver.page_source)
                         hrefs = tree.xpath('//a[contains(@href, "/chintai/bc_") or contains(@href, "/chintai/jnc_")]/@href')
+                        
+                        # 重複を除いてこのページの物件URLリストを作成
+                        page_detail_urls = []
                         for href in hrefs:
                             full_url = urljoin("https://suumo.jp", href)
-                            if full_url not in all_detail_urls: all_detail_urls.append(full_url)
+                            if full_url not in page_detail_urls:
+                                page_detail_urls.append(full_url)
                         
+                        # 「次へ」ボタンのURLを事前に確保しておく
                         try:
-                            driver.find_element(By.XPATH, '//a[contains(text(), "次へ")]').click()
-                            page_count += 1
-                            time.sleep(3)
+                            next_element = driver.find_element(By.XPATH, '//a[contains(text(), "次へ")]')
+                            next_list_url = next_element.get_attribute("href")
                         except:
+                            next_list_url = None
+
+                        if not page_detail_urls:
+                            st.warning("このページから物件URLを取得できませんでした。")
+                            break
+
+                        # そのページで取得したURLの詳細をすぐに抜きに行く（人間と同じ動き）
+                        total_in_page = len(page_detail_urls)
+                        for idx, url in enumerate(page_detail_urls, 1):
+                            status_text.text(f"【{page_count}ページ目】 抽出中... ({idx}/{total_in_page}件) [合計: {len(all_properties_data)}件]")
+                            try:
+                                data = scrape_suumo_refined(url, driver)
+                                all_properties_data.append(data)
+                            except Exception as e:
+                                pass # エラーが出ても止まらず次へ行く
+                            
+                            progress_bar.progress(idx / total_in_page)
+
+                        # 指定ページ数に達した、または次のページがなければ終了
+                        if page_count >= max_pages or not next_list_url:
+                            st.success(f"予定の処理が完了しました！")
                             break
                             
-                    progress_bar = st.progress(0)
-                    for idx, url in enumerate(all_detail_urls, 1):
-                        try:
-                            all_properties_data.append(scrape_suumo_refined(url, driver))
-                        except Exception: pass
-                        progress_bar.progress(idx / len(all_detail_urls))
+                        # 次の一覧ページへ進む準備
+                        current_list_url = next_list_url
+                        page_count += 1
                         
+                        # ページをまたぐ前に少し長めに休む
+                        status_text.info("次のページへ移動する前に待機しています...")
+                        time.sleep(random.uniform(5.0, 8.0))
+
+                except Exception as e:
+                    # 途中でSUUMOに止められたりエラーが起きても、そこまでのデータを救済する
+                    st.warning(f"処理が中断されましたが、取得済みのデータを保存します。")
                 finally:
                     driver.quit()
+                    status_text.empty()
+                    progress_bar.empty()
 
+                # データが1件でも取れていればExcelにする
                 if all_properties_data:
                     df = pd.DataFrame(all_properties_data)
                     df = df.drop_duplicates(subset=[col for col in ['物件名', '家賃', '間取り', '専有面積', '階'] if col in df.columns], keep='first')
-                    st.success(f"🎉 {len(df)}件のデータを取得しました。Excelをダウンロードしてタブ2へ進んでください。")
+                    st.success(f"🎉 合計 {len(df)} 件のデータを取得しました！Excelをダウンロードしてタブ2へ進んでください。")
                     excel_buffer = io.BytesIO()
                     df.to_excel(excel_buffer, index=False, engine="openpyxl")
                     st.download_button("📥 データをExcelでダウンロード", data=excel_buffer.getvalue(), file_name="local_area_data.xlsx")
 
+    # --- タブ2：カスタム査定機能 ---
     with tab2:
         st.write("対象エリアの「Excelデータ」と、あなたの相場観をまとめた「rules.csv」をアップロードしてください。")
         colA, colB = st.columns(2)
@@ -205,7 +245,6 @@ def main():
         with colB: rules_file = st.file_uploader("2. 共通ルール表 (rules.csv)", type=["csv"])
         
         if local_file and rules_file:
-            # ルールの読み込み（転置フォーマット対応）
             rules_df = pd.read_csv(rules_file)
             rules_dict = {}
             layouts = ['ワンルーム', '1K・1DK', '1LDK', '2K・2DK', '2LDK', '3K・3DK', '3LDK']
@@ -217,21 +256,18 @@ def main():
                         val = row[layout]
                         rules_dict[layout][rule_name] = float(val) if pd.notna(val) else 0.0
 
-            # エリアデータの読み込みと逆算
             df_ml = clean_data_flexible(pd.read_excel(local_file))
             
-            # 各物件の「純粋なハコ代（ルール適用後の残り家賃）」を計算
             def get_base_rent(row):
                 adj = calc_rule_adjustments(row['面積_数値'], row['徒歩_数値'], row['築年数_数値'], row['バストイレ別'], row['オートロック'], rules_dict, row['間取りグループ'])
                 return row['家賃_数値'] - adj
             
             df_ml['ハコ代'] = df_ml.apply(get_base_rent, axis=1)
-            df_ml['計算用面積'] = df_ml['面積_数値'].apply(lambda x: max(0, x - 10)) # 設備面積10㎡を引く
+            df_ml['計算用面積'] = df_ml['面積_数値'].apply(lambda x: max(0, x - 10))
             
             local_base_prices = {}
             local_unit_prices = {}
             
-            # 間取りごとに相場（切片と傾き）をAIで逆算
             for layout in layouts:
                 target_df = df_ml[df_ml['間取りグループ'] == layout]
                 if len(target_df) >= 3:
@@ -239,14 +275,12 @@ def main():
                     local_base_prices[layout] = model.intercept_
                     local_unit_prices[layout] = model.coef_[0]
                 else:
-                    # データが足りない間取りは、エリア全体の平均水準で代用
                     model = LinearRegression().fit(df_ml[['計算用面積']], df_ml['ハコ代'])
                     local_base_prices[layout] = model.intercept_
                     local_unit_prices[layout] = model.coef_[0]
 
             st.success("✅ ルールの適用と、エリア相場の逆算が完了しました！")
             
-            # 逆算された相場を可視化
             st.markdown("### 📍 このエリアの自動算出相場（間取り別）")
             market_df = pd.DataFrame({
                 "間取り": layouts,
@@ -270,7 +304,6 @@ def main():
             with col6: i_auto = st.checkbox("オートロック", value=False)
             with col7: i_premium = st.number_input("駅プレミアム加算額 (円)", value=0, step=1000)
 
-            # 最終査定額の計算 = [逆算されたベース] + [逆算㎡単価 × 超過面積] + [ルール加減算] + [手動加算]
             base = local_base_prices[target_layout]
             unit = local_unit_prices[target_layout]
             
