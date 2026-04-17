@@ -12,8 +12,9 @@ st.title("🏡 不動産ハイブリッド査定システム (AI × プロの相
 # =========================================================
 # 2. 前処理・データ読み込みエンジン
 # =========================================================
+# キャッシュをリフレッシュするために関数名を v2 に変更しています
 @st.cache_data
-def analyze_real_estate_data(suumo_file, rules_file):
+def analyze_real_estate_data_v2(suumo_file, rules_file):
     """
     1. ルールCSVから、加減算の係数を直接読み込む
     2. SUUMOデータ(Excel/CSV)をクレンジングし、駅名などの情報を抽出して返す
@@ -46,6 +47,7 @@ def analyze_real_estate_data(suumo_file, rules_file):
     except Exception:
         df_suumo = pd.read_csv(suumo_file)
 
+    # 必須列チェック
     if '家賃' not in df_suumo.columns and '賃料' not in df_suumo.columns:
         st.error("❌ エラー: SUUMOデータ側に「家賃」の列が見つかりません。ファイルを選択する枠が逆になっていないか確認してください。")
         st.stop()
@@ -94,25 +96,53 @@ def analyze_real_estate_data(suumo_file, rules_file):
     else:
         df_suumo['間取りグループ'] = '1K・1DK'
 
-    # 駅名の抽出（「京王線/桜上水駅 歩3分」→「桜上水」に加工）
+    # ---------------------------------------------------------
+    # ③ 駅名の超強力な自動抽出
+    # ---------------------------------------------------------
+    # データ内の「駅」や「交通」と名の付く列を自動捜索する
+    station_col = None
+    for col in df_suumo.columns:
+        col_str = str(col).replace(' ', '').replace('　', '')
+        if '駅' in col_str or '沿線' in col_str or '交通' in col_str:
+            if '1' in col_str or '１' in col_str:
+                station_col = col
+                break
+            if station_col is None:
+                station_col = col
+
     def extract_station(text):
-        text = str(text)
-        if '/' in text:
-            text = text.split('/')[-1]
-        if ' 歩' in text:
-            text = text.split(' 歩')[0]
-        if ' バス' in text:
-            text = text.split(' バス')[0]
+        text = str(text).strip()
+        if text == 'nan' or text == '' or text == 'None':
+            return '不明'
+            
+        # 「」で囲まれている場合は中身を最優先
+        m = re.search(r'[「\[【](.+?)[」\]】]', text)
+        if m:
+            text = m.group(1)
+        else:
+            # スラッシュがあれば後ろを取る（路線名/駅名）
+            if '/' in text:
+                text = text.split('/')[-1]
+            # スペースで区切られている場合（路線名 駅名 徒歩）
+            elif ' ' in text or '　' in text:
+                parts = re.split(r'[ 　]+', text)
+                if len(parts) >= 2:
+                    text = parts[1] # たいてい2つ目のブロックが駅名
+        
+        # 不要な文字（徒歩、バスなど）以降をバッサリ切る
+        text = re.split(r'歩|徒歩|バス|車', text)[0]
+        text = text.strip()
+        
         if text.endswith('駅'):
             text = text[:-1]
-        return text.strip()
+            
+        return text if text else '不明'
 
-    if '最寄駅1' in df_suumo.columns:
-        df_suumo['駅名'] = df_suumo['最寄駅1'].apply(extract_station)
+    if station_col:
+        df_suumo['駅名'] = df_suumo[station_col].apply(extract_station)
     else:
         df_suumo['駅名'] = '不明'
 
-    # ルールの辞書と、加工済みの生データ(df_suumo)を返す
     return extracted_rules, df_suumo
 
 # =========================================================
@@ -125,7 +155,6 @@ tab1, tab2 = st.tabs(["📂 ①データのアップロード＆解析", "🤖 �
 # ---------------------------------------------------------
 with tab1:
     st.write("当該エリアのSUUMO物件一覧エクセルと、ルールフォーマットCSVをアップロードしてください。")
-    st.write("※ルールCSVに記載された加減算金額が、そのままシミュレーターの設備に反映されます。")
     
     colA, colB = st.columns(2)
     with colA:
@@ -134,13 +163,13 @@ with tab1:
         uploaded_rules = st.file_uploader("ルールフォーマット (CSV)", type=["csv"])
 
     if uploaded_suumo is not None and uploaded_rules is not None:
-        with st.spinner("データを解析してエリアの相場・ルールを構築しています..."):
-            extracted_rules, df_suumo = analyze_real_estate_data(uploaded_suumo, uploaded_rules)
+        with st.spinner("データを解析し、駅ごとの相場とルールを構築しています..."):
+            extracted_rules, df_suumo = analyze_real_estate_data_v2(uploaded_suumo, uploaded_rules)
             
             st.session_state['rules'] = extracted_rules
             st.session_state['df_suumo'] = df_suumo
             
-            st.success("✅ データの解析が完了しました！「②詳細査定シミュレーター」タブに移動して査定を行ってください。")
+            st.success("✅ 解析完了！駅名を自動抽出しました。「②詳細査定シミュレーター」タブへお進みください。")
 
 # ---------------------------------------------------------
 # TAB 2: シミュレーター画面
@@ -155,13 +184,20 @@ with tab2:
         rules = st.session_state['rules']
         df_suumo = st.session_state['df_suumo']
 
+        # 有効な間取りリスト
         valid_layouts = list(rules.keys())
-        # データから重複のない駅リストを作成（空文字やnanを除外）
-        station_list = ['指定なし'] + sorted([s for s in df_suumo['駅名'].unique() if s and str(s) != 'nan' and s != '不明'])
+        default_layout_idx = valid_layouts.index('1K・1DK') if '1K・1DK' in valid_layouts else 0
         
+        # データの駅名からプルダウンの選択肢を作成
+        raw_stations = df_suumo['駅名'].unique()
+        station_list = ['指定なし'] + sorted([s for s in raw_stations if pd.notna(s) and str(s).strip() not in ['', 'nan', '不明']])
+        
+        if len(station_list) == 1:
+            st.warning("⚠️ データから駅名をうまく抽出できませんでした。データに駅情報が含まれているかご確認ください。")
+
         st.markdown("**基本スペック**")
         col1, col2, col3, col4, col5 = st.columns(5)
-        with col1: target_layout = st.selectbox("間取りタイプ", valid_layouts, index=1)
+        with col1: target_layout = st.selectbox("間取りタイプ", valid_layouts, index=default_layout_idx)
         with col2: selected_station = st.selectbox("対象駅", station_list)
         with col3: i_area = st.number_input("専有面積 (㎡)", min_value=10.0, max_value=200.0, value=25.0, step=0.5)
         with col4: i_age = st.number_input("築年数 (年) ※新築は0", min_value=0, max_value=100, value=5)
@@ -196,18 +232,19 @@ with tab2:
         # ==========================================
         # 査定計算ロジック（駅による相場の絞り込み）
         # ==========================================
-        # 選択された駅と間取りでデータをフィルタリング
+        # プルダウンで選ばれた駅に絞ってデータを取り出す
         if selected_station == '指定なし':
             df_filtered = df_suumo[df_suumo['間取りグループ'] == target_layout]
             station_label = "当該エリア全体"
         else:
             df_filtered = df_suumo[(df_suumo['間取りグループ'] == target_layout) & (df_suumo['駅名'] == selected_station)]
-            station_label = f"{selected_station}駅"
+            station_label = f"{selected_station}駅周辺"
 
         tanka_series = df_filtered['㎡単価'].dropna()
+        data_count = len(tanka_series)
         
-        # 絞り込んだ結果、データが存在するかチェック
-        if len(tanka_series) > 0:
+        # 絞り込んだ駅にデータが存在するかチェック
+        if data_count > 0:
             tanka_base = tanka_series.median()
             layout_stats = {
                 'min_tanka': tanka_series.min(),
@@ -223,9 +260,11 @@ with tab2:
                 tanka_base = tanka_all.median()
                 st.warning(f"⚠️ 指定された「{selected_station}駅」には「{target_layout}」のデータが存在しないため、ベース家賃はエリア全体の相場を使用しています。")
                 layout_stats = None
+                data_count = len(tanka_all)
             else:
                 tanka_base = 4000
                 layout_stats = None
+                data_count = 0
 
         r = rules.get(target_layout, {})
         
@@ -298,7 +337,8 @@ with tab2:
         )
 
         st.markdown("<br><hr>", unsafe_allow_html=True)
-        st.subheader(f"📈 面積 {i_area}㎡ の箱に対する、【{station_label}】の純粋な相場帯")
+        # 件数も合わせて表示することで納得感（信頼感）を出す
+        st.subheader(f"📈 面積 {i_area}㎡ の箱に対する、【{station_label}】の純粋な相場帯（データ: {data_count}件）")
         st.caption("※設備等を一切考慮せず、同じ間取り・同じ広さの物件が市場でどう分布しているかを示します。")
 
         if layout_stats:
