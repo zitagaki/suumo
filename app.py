@@ -13,10 +13,10 @@ st.title("🏡 不動産ハイブリッド査定システム (AI × プロの相
 # 2. 前処理・データ読み込みエンジン
 # =========================================================
 @st.cache_data
-def analyze_real_estate_data_v3(suumo_file, rules_file):
+def analyze_real_estate_data_v4(suumo_file, rules_file):
     """
-    1. ルールCSVから、加減算の係数を直接読み込む
-    2. SUUMOデータ(Excel/CSV)をクレンジングし、駅名などの情報を抽出して返す
+    どんな形式の不動産データ（列名違い）でも自動で項目を探し出し、
+    駅ごとの相場や面積単価を算出する強力なエンジン
     """
     # ---------------------------------------------------------
     # ① ルールCSVから係数を抽出
@@ -39,34 +39,32 @@ def analyze_real_estate_data_v3(suumo_file, rules_file):
         extracted_rules[madori] = rule_dict
 
     # ---------------------------------------------------------
-    # ② SUUMOデータをクレンジング
+    # ② SUUMOデータをクレンジング（どんな列名でも対応）
     # ---------------------------------------------------------
     try:
         df_suumo = pd.read_excel(suumo_file)
     except Exception:
         df_suumo = pd.read_csv(suumo_file)
 
-    # 必須列チェック
-    if '家賃' not in df_suumo.columns and '賃料' not in df_suumo.columns:
-        st.error("❌ エラー: SUUMOデータ側に「家賃」の列が見つかりません。ファイルを選択する枠が逆になっていないか確認してください。")
+    # --- 家賃 ---
+    rent_col = next((c for c in df_suumo.columns if '家賃' in str(c) or '賃料' in str(c)), None)
+    if not rent_col:
+        st.error("❌ エラー: データに「家賃」または「賃料」の列が見つかりません。")
         st.stop()
-
-    # 家賃と共益費の合算
-    rent_col = '家賃' if '家賃' in df_suumo.columns else '賃料'
     df_suumo['家賃_円'] = df_suumo[rent_col].astype(str).str.extract(r'([\d\.]+)').astype(float) * 10000
     
-    if '共益費' in df_suumo.columns:
-        df_suumo['共益費_円'] = df_suumo['共益費'].astype(str).replace('-', '0').str.extract(r'([\d\.]+)').astype(float).fillna(0)
-    elif '管理費' in df_suumo.columns:
-        df_suumo['共益費_円'] = df_suumo['管理費'].astype(str).replace('-', '0').str.extract(r'([\d\.]+)').astype(float).fillna(0)
+    # --- 管理費・共益費 ---
+    kyoeki_col = next((c for c in df_suumo.columns if '共益費' in str(c) or '管理費' in str(c)), None)
+    if kyoeki_col:
+        df_suumo['共益費_円'] = df_suumo[kyoeki_col].astype(str).replace('-', '0').str.extract(r'([\d\.]+)').astype(float).fillna(0)
     else:
         df_suumo['共益費_円'] = 0
 
     df_suumo.loc[df_suumo['共益費_円'] < 100, '共益費_円'] = df_suumo['共益費_円'] * 10000
     df_suumo['総家賃'] = df_suumo['家賃_円'] + df_suumo['共益費_円']
 
-    # 専有面積と㎡単価
-    area_col = '専有面積' if '専有面積' in df_suumo.columns else '面積' if '面積' in df_suumo.columns else None
+    # --- 専有面積 ---
+    area_col = next((c for c in df_suumo.columns if '面積' in str(c)), None)
     if area_col:
         df_suumo['専有面積_m2'] = df_suumo[area_col].astype(str).str.extract(r'([\d\.]+)').astype(float)
     else:
@@ -74,19 +72,36 @@ def analyze_real_estate_data_v3(suumo_file, rules_file):
 
     df_suumo['㎡単価'] = df_suumo['総家賃'] / df_suumo['専有面積_m2']
 
-    # 間取りのグルーピング
-    madori_col = '間取り' if '間取り' in df_suumo.columns else '間取' if '間取' in df_suumo.columns else None
+    # --- 徒歩分数 ---
+    walk_col = next((c for c in df_suumo.columns if str(c) in ['徒歩1', '徒歩', '歩']), None)
+    if walk_col:
+        df_suumo['徒歩分数'] = df_suumo[walk_col].astype(str).str.extract(r'(\d+)').astype(float).fillna(10)
+    else:
+        station_info_col = next((c for c in df_suumo.columns if '駅' in str(c)), None)
+        if station_info_col:
+            df_suumo['徒歩分数'] = df_suumo[station_info_col].astype(str).str.extract(r'(?:歩|徒歩)(\d+)分').astype(float).fillna(10)
+        else:
+            df_suumo['徒歩分数'] = 10
+
+    # --- 築年数 ---
+    age_col = next((c for c in df_suumo.columns if '築' in str(c) or '数' in str(c)), None)
+    if age_col:
+        df_suumo['築年'] = df_suumo[age_col].apply(lambda x: 0 if '新築' in str(x) else float(re.search(r'\d+', str(x)).group()) if pd.notna(x) and re.search(r'\d+', str(x)) else 0)
+    else:
+        df_suumo['築年'] = 0
+
+    # --- 間取り ---
+    madori_col = next((c for c in df_suumo.columns if '間取' in str(c)), None)
     def map_madori(m):
         m = str(m).upper().replace(' ', '').replace('　', '') 
         import unicodedata
         m = unicodedata.normalize('NFKC', m) 
-        
         if '1R' in m or 'ワンルーム' in m: return 'ワンルーム'
-        if m in ['1K', '1DK', '1SK', '1SDK']: return '1K・1DK'
-        if m in ['1LDK', '1SLDK']: return '1LDK'
-        if m in ['2K', '2DK', '2SK', '2SDK']: return '2K・2DK'
-        if m in ['2LDK', '2SLDK']: return '2LDK'
-        if m in ['3K', '3DK', '3SK', '3SDK']: return '3K・3DK'
+        if any(x in m for x in ['1K', '1DK', '1SK', '1SDK']): return '1K・1DK'
+        if any(x in m for x in ['1LDK', '1SLDK']): return '1LDK'
+        if any(x in m for x in ['2K', '2DK', '2SK', '2SDK']): return '2K・2DK'
+        if any(x in m for x in ['2LDK', '2SLDK']): return '2LDK'
+        if any(x in m for x in ['3K', '3DK', '3SK', '3SDK']): return '3K・3DK'
         if '3LDK' in m or '4' in m or '5' in m: return '3LDK'
         return 'その他'
     
@@ -96,37 +111,43 @@ def analyze_real_estate_data_v3(suumo_file, rules_file):
         df_suumo['間取りグループ'] = '1K・1DK'
 
     # ---------------------------------------------------------
-    # ③ 駅名の超強力な自動抽出（沿線名や不要な文字を弾く）
+    # ③ 駅名の超強力な自動抽出（どんな列名・データでも対応）
     # ---------------------------------------------------------
+    target_station_cols = ['駅1', '最寄駅1', '駅', '最寄駅']
     station_col = None
-    for col in df_suumo.columns:
-        col_str = str(col).replace(' ', '').replace('　', '')
-        if '駅' in col_str or '沿線' in col_str or '交通' in col_str:
-            if '1' in col_str or '１' in col_str:
-                station_col = col
-                break
-            if station_col is None:
-                station_col = col
+    for c in target_station_cols:
+        if c in df_suumo.columns:
+            station_col = c
+            break
+            
+    if not station_col:
+        for col in df_suumo.columns:
+            col_str = str(col).replace(' ', '').replace('　', '')
+            if '駅' in col_str and '沿線' not in col_str:
+                if '1' in col_str or '１' in col_str:
+                    station_col = col
+                    break
+                if station_col is None:
+                    station_col = col
 
     def extract_station(text):
         text = str(text).strip()
         if text in ('nan', '', 'None', '-'):
             return '不明'
             
-        # 1. まず「歩」「徒歩」「バス」「車」以降の不要な文字をカット
+        # 「歩」「徒歩」「バス」「車」以降をカット
         text = re.split(r'歩|徒歩|バス|車', text)[0].strip()
         
-        # 2. スラッシュ「/」やスペースでブロックに分割
+        # スラッシュやスペースで分割
         parts = re.split(r'[/ 　]+', text)
         
         station_name = ""
-        # 3. 「駅」という文字が含まれているブロックを優先的に探す（後ろから探す）
+        # 後ろのブロックから「駅」という文字を探す
         for part in reversed(parts):
             if '駅' in part:
                 station_name = part.replace('駅', '')
                 break
         
-        # 4. 「駅」が見つからなかった場合（例：「京王線/桜上水」など）は最後の要素を駅名とみなす
         if not station_name:
             if len(parts) > 1:
                 station_name = parts[-1] 
@@ -135,7 +156,9 @@ def analyze_real_estate_data_v3(suumo_file, rules_file):
                 
         station_name = station_name.strip()
         
-        # 5. 明らかに沿線名（〜線）のみの場合は「不明」として除外
+        if station_name.endswith('駅'):
+            station_name = station_name[:-1]
+            
         if station_name.endswith('線'):
             return '不明'
             
@@ -167,7 +190,7 @@ with tab1:
 
     if uploaded_suumo is not None and uploaded_rules is not None:
         with st.spinner("データを解析し、駅ごとの相場とルールを構築しています..."):
-            extracted_rules, df_suumo = analyze_real_estate_data_v3(uploaded_suumo, uploaded_rules)
+            extracted_rules, df_suumo = analyze_real_estate_data_v4(uploaded_suumo, uploaded_rules)
             
             st.session_state['rules'] = extracted_rules
             st.session_state['df_suumo'] = df_suumo
@@ -187,11 +210,9 @@ with tab2:
         rules = st.session_state['rules']
         df_suumo = st.session_state['df_suumo']
 
-        # 有効な間取りリスト
         valid_layouts = list(rules.keys())
         default_layout_idx = valid_layouts.index('1K・1DK') if '1K・1DK' in valid_layouts else 0
         
-        # データの駅名からプルダウンの選択肢を作成（「不明」は弾く）
         raw_stations = df_suumo['駅名'].unique()
         station_list = ['指定なし'] + sorted([s for s in raw_stations if pd.notna(s) and str(s).strip() not in ['', 'nan', '不明']])
         
