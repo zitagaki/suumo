@@ -30,16 +30,43 @@ def analyze_real_estate_data(suumo_file, rules_file):
         
     df_rules = pd.read_csv(rules_file)
 
-    # --- 基本的な数値のクレンジング ---
-    df_suumo['家賃_円'] = df_suumo['家賃'].astype(str).str.extract(r'([\d\.]+)').astype(float) * 10000
-    df_suumo['共益費_円'] = df_suumo['共益費'].astype(str).replace('-', '0').str.extract(r'([\d\.]+)').astype(float).fillna(0)
+    # ⚠️【追加】アップロード間違い防止のエラーチェック
+    if '家賃' not in df_suumo.columns and '賃料' not in df_suumo.columns:
+        st.error("❌ エラー: SUUMOデータ側に「家賃」の列が見つかりません。ファイルを選択する枠が逆になっていないか確認してください。")
+        st.stop()
+
+    # --- 基本的な数値のクレンジング（安全な取得処理） ---
+    # 1. 家賃
+    rent_col = '家賃' if '家賃' in df_suumo.columns else '賃料'
+    df_suumo['家賃_円'] = df_suumo[rent_col].astype(str).str.extract(r'([\d\.]+)').astype(float) * 10000
+    
+    # 2. 共益費（列が無い場合や「管理費」になっている場合を吸収）
+    if '共益費' in df_suumo.columns:
+        df_suumo['共益費_円'] = df_suumo['共益費'].astype(str).replace('-', '0').str.extract(r'([\d\.]+)').astype(float).fillna(0)
+    elif '管理費' in df_suumo.columns:
+        df_suumo['共益費_円'] = df_suumo['管理費'].astype(str).replace('-', '0').str.extract(r'([\d\.]+)').astype(float).fillna(0)
+    else:
+        df_suumo['共益費_円'] = 0 # どちらも無い場合は0円とする
+
+    # 万単位表記の共益費がある場合の補正（例: 1.5万 -> 15000）
     df_suumo.loc[df_suumo['共益費_円'] < 100, '共益費_円'] = df_suumo['共益費_円'] * 10000
     df_suumo['総家賃'] = df_suumo['家賃_円'] + df_suumo['共益費_円']
 
-    df_suumo['専有面積_m2'] = df_suumo['専有面積'].astype(str).str.extract(r'([\d\.]+)').astype(float)
+    # 3. 専有面積
+    area_col = '専有面積' if '専有面積' in df_suumo.columns else '面積' if '面積' in df_suumo.columns else None
+    if area_col:
+        df_suumo['専有面積_m2'] = df_suumo[area_col].astype(str).str.extract(r'([\d\.]+)').astype(float)
+    else:
+        st.error("❌ エラー: データ内に「専有面積」の列が見つかりません。")
+        st.stop()
+
     df_suumo['㎡単価'] = df_suumo['総家賃'] / df_suumo['専有面積_m2']
 
-    df_suumo['徒歩分数'] = df_suumo['最寄駅1'].astype(str).str.extract(r'歩(\d+)分').astype(float).fillna(10)
+    # 4. 徒歩分数
+    if '最寄駅1' in df_suumo.columns:
+        df_suumo['徒歩分数'] = df_suumo['最寄駅1'].astype(str).str.extract(r'歩(\d+)分').astype(float).fillna(10)
+    else:
+        df_suumo['徒歩分数'] = 10 # 取得できない場合は一律10分とする
 
     # エクセルによって列名が「築年数」か「数」になる場合への対応
     age_col = '築年数' if '築年数' in df_suumo.columns else '数' if '数' in df_suumo.columns else None
@@ -49,6 +76,7 @@ def analyze_real_estate_data(suumo_file, rules_file):
         df_suumo['築年'] = 0
 
     # 間取りのグルーピング
+    madori_col = '間取り' if '間取り' in df_suumo.columns else '間取' if '間取' in df_suumo.columns else None
     def map_madori(m):
         m = str(m)
         if '1R' in m or 'ワンルーム' in m: return 'ワンルーム'
@@ -59,7 +87,11 @@ def analyze_real_estate_data(suumo_file, rules_file):
         if m in ['3K', '3DK', '3SK', '3SDK']: return '3K・3DK'
         if '3LDK' in m or '4' in m or '5' in m: return '3LDK'
         return 'その他'
-    df_suumo['間取りグループ'] = df_suumo['間取り'].apply(map_madori)
+    
+    if madori_col:
+        df_suumo['間取りグループ'] = df_suumo[madori_col].apply(map_madori)
+    else:
+        df_suumo['間取りグループ'] = 'ワンルーム'
 
     # --- 特徴量（フラグ）の作成 ---
     features = pd.DataFrame(index=df_suumo.index)
@@ -73,10 +105,21 @@ def analyze_real_estate_data(suumo_file, rules_file):
     features['築年_4_6年単価'] = ((df_suumo['築年'] >= 4) & (df_suumo['築年'] <= 6)).astype(int)
     features['築年_7_10年単価'] = ((df_suumo['築年'] >= 7) & (df_suumo['築年'] <= 10)).astype(int)
 
-    df_suumo['現在階'] = df_suumo['階建'].astype(str).str.extract(r'(\d+)階/').astype(float)
+    if '階建' in df_suumo.columns:
+        df_suumo['現在階'] = df_suumo['階建'].astype(str).str.extract(r'(\d+)階/').astype(float)
+    elif '階' in df_suumo.columns:
+        df_suumo['現在階'] = df_suumo['階'].astype(str).str.extract(r'(\d+)').astype(float)
+    else:
+        df_suumo['現在階'] = 1
+
     features['2階以上'] = (df_suumo['現在階'] >= 2).astype(int)
 
-    df_suumo['text_all'] = df_suumo['設備'].fillna('') + df_suumo['条件'].fillna('') + df_suumo['備考'].fillna('')
+    # 設備情報の安全な取得
+    equip_text = df_suumo['設備'].fillna('') if '設備' in df_suumo.columns else ""
+    cond_text = df_suumo['条件'].fillna('') if '条件' in df_suumo.columns else ""
+    note_text = df_suumo['備考'].fillna('') if '備考' in df_suumo.columns else ""
+    df_suumo['text_all'] = equip_text + cond_text + note_text
+    
     def check_kwd(keywords):
         return df_suumo['text_all'].str.contains('|'.join(keywords), na=False).astype(int)
 
