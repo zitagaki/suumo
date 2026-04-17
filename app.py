@@ -1,221 +1,293 @@
-import time
-import random
-import re
 import pandas as pd
 import numpy as np
+import re
+from sklearn.linear_model import Ridge
 import streamlit as st
+import io
 
 # =========================================================
-# 1. 査定ルール辞書（機械学習で抽出した各間取りの加減算係数）
+# 1. ページ設定
 # =========================================================
-# ※値は「㎡単価（円）」への影響額。固定ペナルティのみ「総額（円）」への影響額。
-RULES_DICT = {
-    'ワンルーム': {
-        '徒歩10分超固定ペナルティ': -1233, '徒歩10分超追加単価': -29, 
-        '築年_新築単価': -101, '築年_1_3年単価': 88, '築年_4_6年単価': -2, '築年_7_10年単価': 16,
-        '2階以上': 51, '角部屋': 135, '南向き': -95, '洗面所独立': -176, 'バス・トイレ別': -210,
-        '温水洗浄便座': 107, '浴室乾燥機': -116, 'システムキッチン': -65, 'オートロック': -85,
-        '宅配ボックス': -174, 'インターネット無料': 127
-    },
-    '1K・1DK': {
-        '徒歩10分超固定ペナルティ': -1792, '徒歩10分超追加単価': -101, 
-        '築年_新築単価': -127, '築年_1_3年単価': 261, '築年_4_6年単価': 91, '築年_7_10年単価': -225,
-        '2階以上': 13, '角部屋': -83, '南向き': -86, '洗面所独立': -102, 'バス・トイレ別': -37,
-        '温水洗浄便座': 175, '浴室乾燥機': -7, 'システムキッチン': 90, 'オートロック': 137,
-        '宅配ボックス': 126, 'インターネット無料': -85
-    },
-    '1LDK': {
-        '徒歩10分超固定ペナルティ': 1295, '徒歩10分超追加単価': -58, 
-        '築年_新築単価': 277, '築年_1_3年単価': 42, '築年_4_6年単価': -228, '築年_7_10年単価': -91,
-        '2階以上': 26, '角部屋': -23, '南向き': -26, '洗面所独立': -26, 'バス・トイレ別': 12,
-        '温水洗浄便座': 112, '浴室乾燥機': 22, 'システムキッチン': -1, 'オートロック': 205,
-        '宅配ボックス': 143, 'インターネット無料': -46
-    },
-    '2K・2DK': {
-        '徒歩10分超固定ペナルティ': 52, '徒歩10分超追加単価': 1, 
-        '築年_新築単価': 2, '築年_1_3年単価': 21, '築年_4_6年単価': 34, '築年_7_10年単価': -58,
-        '2階以上': -24, '角部屋': 11, '南向き': 0, '洗面所独立': 13, 'バス・トイレ別': 0,
-        '温水洗浄便座': 0, '浴室乾燥機': 0, 'システムキッチン': 0, 'オートロック': 75,
-        '宅配ボックス': 75, 'インターネット無料': -17
-    },
-    '2LDK': {
-        '徒歩10分超固定ペナルティ': -1292, '徒歩10分超追加単価': -37, 
-        '築年_新築単価': 248, '築年_1_3年単価': -29, '築年_4_6年単価': -80, '築年_7_10年単価': -139,
-        '2階以上': 87, '角部屋': 17, '南向き': 8, '洗面所独立': -70, 'バス・トイレ別': -6,
-        '温水洗浄便座': 33, '浴室乾燥機': -45, 'システムキッチン': 24, 'オートロック': 128,
-        '宅配ボックス': 140, 'インターネット無料': -90
-    },
-    '3LDK': {
-        '徒歩10分超固定ペナルティ': 293, '徒歩10分超追加単価': 2, 
-        '築年_新築単価': 4, '築年_1_3年単価': -3, '築年_4_6年単価': 22, '築年_7_10年単価': -23,
-        '2階以上': -25, '角部屋': -62, '南向き': 30, '洗面所独立': 27, 'バス・トイレ別': -10,
-        '温水洗浄便座': 4, '浴室乾燥機': -11, 'システムキッチン': 3, 'オートロック': 63,
-        '宅配ボックス': 12, 'インターネット無料': 37
+st.set_page_config(page_title="不動産ハイブリッド査定システム", layout="wide")
+st.title("🏡 不動産ハイブリッド査定システム (AI × プロの相場観)")
+
+# =========================================================
+# 2. 前処理・AIルール算出エンジン
+# =========================================================
+@st.cache_data
+def analyze_real_estate_data(suumo_file, rules_file):
+    """
+    アップロードされたSUUMO(Excel)とrules(CSV)から、
+    1. 各間取りのベース単価
+    2. 設備や条件による加減算ルール
+    を算出する。
+    """
+    # データの読み込み
+    try:
+        df_suumo = pd.read_excel(suumo_file)
+    except Exception:
+        df_suumo = pd.read_csv(suumo_file) # CSVだった場合のフォールバック
+        
+    df_rules = pd.read_csv(rules_file)
+
+    # --- 基本的な数値のクレンジング ---
+    df_suumo['家賃_円'] = df_suumo['家賃'].astype(str).str.extract(r'([\d\.]+)').astype(float) * 10000
+    df_suumo['共益費_円'] = df_suumo['共益費'].astype(str).replace('-', '0').str.extract(r'([\d\.]+)').astype(float).fillna(0)
+    df_suumo.loc[df_suumo['共益費_円'] < 100, '共益費_円'] = df_suumo['共益費_円'] * 10000
+    df_suumo['総家賃'] = df_suumo['家賃_円'] + df_suumo['共益費_円']
+
+    df_suumo['専有面積_m2'] = df_suumo['専有面積'].astype(str).str.extract(r'([\d\.]+)').astype(float)
+    df_suumo['㎡単価'] = df_suumo['総家賃'] / df_suumo['専有面積_m2']
+
+    df_suumo['徒歩分数'] = df_suumo['最寄駅1'].astype(str).str.extract(r'歩(\d+)分').astype(float).fillna(10)
+
+    # エクセルによって列名が「築年数」か「数」になる場合への対応
+    age_col = '築年数' if '築年数' in df_suumo.columns else '数' if '数' in df_suumo.columns else None
+    if age_col:
+        df_suumo['築年'] = df_suumo[age_col].apply(lambda x: 0 if '新築' in str(x) else float(re.search(r'\d+', str(x)).group()) if re.search(r'\d+', str(x)) else 0)
+    else:
+        df_suumo['築年'] = 0
+
+    # 間取りのグルーピング
+    def map_madori(m):
+        m = str(m)
+        if '1R' in m or 'ワンルーム' in m: return 'ワンルーム'
+        if m in ['1K', '1DK', '1SK', '1SDK']: return '1K・1DK'
+        if m in ['1LDK', '1SLDK']: return '1LDK'
+        if m in ['2K', '2DK', '2SK', '2SDK']: return '2K・2DK'
+        if m in ['2LDK', '2SLDK']: return '2LDK'
+        if m in ['3K', '3DK', '3SK', '3SDK']: return '3K・3DK'
+        if '3LDK' in m or '4' in m or '5' in m: return '3LDK'
+        return 'その他'
+    df_suumo['間取りグループ'] = df_suumo['間取り'].apply(map_madori)
+
+    # --- 特徴量（フラグ）の作成 ---
+    features = pd.DataFrame(index=df_suumo.index)
+
+    features['徒歩10分以内単価'] = df_suumo['徒歩分数'].apply(lambda x: x if x <= 10 else 10)
+    features['徒歩10分超固定ペナルティ'] = df_suumo['徒歩分数'].apply(lambda x: 1 if x > 10 else 0)
+    features['徒歩10分超追加単価'] = df_suumo['徒歩分数'].apply(lambda x: x - 10 if x > 10 else 0)
+
+    features['築年_新築単価'] = (df_suumo['築年'] == 0).astype(int)
+    features['築年_1_3年単価'] = ((df_suumo['築年'] >= 1) & (df_suumo['築年'] <= 3)).astype(int)
+    features['築年_4_6年単価'] = ((df_suumo['築年'] >= 4) & (df_suumo['築年'] <= 6)).astype(int)
+    features['築年_7_10年単価'] = ((df_suumo['築年'] >= 7) & (df_suumo['築年'] <= 10)).astype(int)
+
+    df_suumo['現在階'] = df_suumo['階建'].astype(str).str.extract(r'(\d+)階/').astype(float)
+    features['2階以上'] = (df_suumo['現在階'] >= 2).astype(int)
+
+    df_suumo['text_all'] = df_suumo['設備'].fillna('') + df_suumo['条件'].fillna('') + df_suumo['備考'].fillna('')
+    def check_kwd(keywords):
+        return df_suumo['text_all'].str.contains('|'.join(keywords), na=False).astype(int)
+
+    kwd_dict = {
+        '角部屋': ['角部屋', '角住戸'], '南向き': ['南向き', '南面'],
+        '洗面所独立': ['洗面所独立', '独立洗面'], 'バス・トイレ別': ['バストイレ別', 'バス・トイレ別'],
+        '温水洗浄便座': ['温水洗浄便座', 'ウォシュレット'], '浴室乾燥機': ['浴室乾燥機'],
+        'システムキッチン': ['システムキッチン'], 'オートロック': ['オートロック'],
+        '宅配ボックス': ['宅配ボックス'], 'インターネット無料': ['インターネット無料', 'ネット使用料不要']
     }
-}
+    for key, words in kwd_dict.items():
+        features[key] = check_kwd(words)
+
+    # --- 回帰分析で係数を算出 ---
+    madori_list = ['ワンルーム', '1K・1DK', '1LDK', '2K・2DK', '2LDK', '3K・3DK', '3LDK']
+    extracted_rules = {}
+    base_tanka_dict = {}
+    market_stats = {}
+
+    for madori in madori_list:
+        df_m = df_suumo[df_suumo['間取りグループ'] == madori]
+        
+        if len(df_m) < 10:
+            extracted_rules[madori] = {}
+            base_tanka_dict[madori] = 0
+            market_stats[madori] = None
+            continue
+        
+        # 相場の中央値・パーセンタイルを保存
+        tanka_series = df_m['㎡単価'].dropna()
+        base_tanka_dict[madori] = tanka_series.median()
+        
+        market_stats[madori] = {
+            'min_tanka': tanka_series.min(),
+            'max_tanka': tanka_series.max(),
+            'p33_tanka': tanka_series.quantile(0.333),
+            'p67_tanka': tanka_series.quantile(0.667)
+        }
+
+        y = df_m['㎡単価'].fillna(base_tanka_dict[madori])
+        X = features.loc[df_m.index].fillna(0)
+        
+        model = Ridge(alpha=50.0) 
+        model.fit(X, y)
+        
+        madori_results = dict(zip(X.columns, np.round(model.coef_, 0)))
+        mean_area = df_m['専有面積_m2'].mean()
+        madori_results['徒歩10分超固定ペナルティ'] = round(madori_results['徒歩10分超固定ペナルティ'] * mean_area, 0)
+        
+        extracted_rules[madori] = madori_results
+
+    return extracted_rules, base_tanka_dict, market_stats
 
 # =========================================================
-# 2. 査定計算エンジン
+# 3. UIロジック
 # =========================================================
-def calc_rule_adjustments(area, walk, age, features, layout):
-    """設備の加減算ロジックを計算して総額を返す"""
-    r = RULES_DICT.get(layout, RULES_DICT.get('1K・1DK', {}))
-    adj = 0
+# タブの作成
+tab1, tab2 = st.tabs(["📂 ①データのアップロード＆解析", "🤖 ②詳細査定シミュレーター"])
+
+# ---------------------------------------------------------
+# TAB 1: アップロード画面
+# ---------------------------------------------------------
+with tab1:
+    st.write("当該エリアのSUUMO物件一覧エクセルと、ルールフォーマットCSVをアップロードしてください。")
+    st.write("アップロードすると、AIが自動的にエリアごとの相場と加減算ルールを構築します。")
     
-    # --- 徒歩分数の計算 ---
-    if walk > 10:
-        # 固定ペナルティ（総額への直接マイナス）
-        adj += r.get('徒歩10分超固定ペナルティ', 0)
-        # 10分を超えた1分ごとの追加ペナルティ（㎡単価 × 面積）
-        adj += (walk - 10) * r.get('徒歩10分超追加単価', 0) * area
+    colA, colB = st.columns(2)
+    with colA:
+        uploaded_suumo = st.file_uploader("SUUMO物件データ (Excel)", type=["xlsx", "csv"])
+    with colB:
+        uploaded_rules = st.file_uploader("ルールフォーマット (CSV)", type=["csv"])
 
-    # --- 築年数の計算（㎡単価 × 面積） ---
-    if age == 0: adj += r.get('築年_新築単価', 0) * area
-    elif 1 <= age <= 3: adj += r.get('築年_1_3年単価', 0) * area
-    elif 4 <= age <= 6: adj += r.get('築年_4_6年単価', 0) * area
-    elif 7 <= age <= 10: adj += r.get('築年_7_10年単価', 0) * area
-    # 11年以上は今回はベース家賃に吸収される前提で0加算とする
-
-    # --- 設備・条件の計算（㎡単価 × 面積） ---
-    for feat_name, is_checked in features.items():
-        if is_checked:
-            adj += r.get(feat_name, 0) * area
+    if uploaded_suumo is not None and uploaded_rules is not None:
+        with st.spinner("データを解析してエリアの相場・ルールを構築しています..."):
+            extracted_rules, base_tanka_dict, market_stats = analyze_real_estate_data(uploaded_suumo, uploaded_rules)
             
-    return adj
+            # セッションに保存してTab2で使えるようにする
+            st.session_state['rules'] = extracted_rules
+            st.session_state['base_tanka'] = base_tanka_dict
+            st.session_state['market_stats'] = market_stats
+            
+            st.success("✅ データの解析が完了しました！「②詳細査定シミュレーター」タブに移動して査定を行ってください。")
 
-
-# =========================================================
-# 3. Streamlit メインアプリ画面
-# =========================================================
-def main():
-    st.set_page_config(page_title="不動産ハイブリッド査定システム", layout="wide")
-    st.title("🏡 不動産ハイブリッド査定システム (AI × プロの相場観)")
-    
-    tab1, tab2 = st.tabs(["📊 ①対象エリアのデータ収集", "🤖 ②ハイブリッド詳細査定"])
-
-    # ---------------------------------------------------------
-    # TAB 1: スクレイピング画面（お手元の既存ロジックを配置する場所）
-    # ---------------------------------------------------------
-    with tab1:
-        st.write("対象としたい駅やエリアのSUUMO一覧URLを入力し、相場の基準となるデータを収集します。")
-        
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            target_list_url = st.text_input("SUUMOの一覧ページのURL:", placeholder="https://suumo.jp/...")
-        with col2:
-            max_pages = st.number_input("取得する最大ページ数", min_value=1, max_value=50, value=5)
-
-        if st.button("スクレイピングを実行する"):
-            st.info("※ここにSelenium等を用いたスクレイピング処理が走ります。取得したデータをセッションステート等に保存してください。")
-            # 実際にはここに、抽出したデータからベースとなる㎡単価を算出する処理を入れます
-            # 例: st.session_state['base_price_per_sqm'] = 4500
-
-    # ---------------------------------------------------------
-    # TAB 2: 詳細査定シミュレーター
-    # ---------------------------------------------------------
-    with tab2:
+# ---------------------------------------------------------
+# TAB 2: シミュレーター画面
+# ---------------------------------------------------------
+with tab2:
+    if 'rules' not in st.session_state:
+        st.warning("⚠️ 先に「①データのアップロード＆解析」タブでファイルを取り込んでください。")
+    else:
         st.subheader("🤖 詳細査定シミュレーター")
-        st.write("物件の基本スペックと設備を選択し、適正な賃料を算出します。")
+        st.write("解析したエリアデータに基づき、適正な賃料を算出します。")
         
-        # --- 基本スペック入力 ---
-        col1, col2, col3, col4 = st.columns(4)
-        with col1: target_layout = st.selectbox("間取りタイプ", list(RULES_DICT.keys()), index=1)
-        with col2: i_area = st.number_input("専有面積 (㎡)", min_value=10.0, max_value=200.0, value=25.0, step=0.5)
-        with col3: i_age = st.number_input("築年数 (年) ※新築は0", min_value=0, max_value=100, value=5)
-        with col4: i_walk = st.number_input("駅徒歩 (分)", min_value=0, max_value=60, value=8)
+        rules = st.session_state['rules']
+        bases = st.session_state['base_tanka']
+        stats = st.session_state['market_stats']
 
-        # --- 設備条件の入力 ---
-        st.markdown("**付加価値・設備条件（チェックで査定額に反映されます）**")
-        col5, col6, col7, col8 = st.columns(4)
-        with col5:
-            i_2f = st.checkbox("2階以上", value=True)
-            i_corner = st.checkbox("角部屋", value=False)
-            i_south = st.checkbox("南向き", value=False)
-        with col6:
-            i_bt = st.checkbox("バス・トイレ別", value=True)
-            i_sh = st.checkbox("洗面所独立", value=False)
-            i_wc = st.checkbox("温水洗浄便座", value=False)
-        with col7:
-            i_sys = st.checkbox("システムキッチン", value=False)
-            i_dry = st.checkbox("浴室乾燥機", value=False)
-            i_net = st.checkbox("インターネット無料", value=False)
-        with col8:
-            i_auto = st.checkbox("オートロック", value=True)
-            i_box = st.checkbox("宅配ボックス", value=False)
-            i_premium = st.number_input("その他・手動プレミアム (円)", value=0, step=1000)
-
-        # 選択された設備を辞書にまとめる
-        selected_features = {
-            '2階以上': i_2f, '角部屋': i_corner, '南向き': i_south,
-            'バス・トイレ別': i_bt, '洗面所独立': i_sh, '温水洗浄便座': i_wc,
-            'システムキッチン': i_sys, '浴室乾燥機': i_dry, 'インターネット無料': i_net,
-            'オートロック': i_auto, '宅配ボックス': i_box
-        }
-
-        # ==========================================
-        # 査定計算ロジック
-        # ==========================================
-        # 本来はTab1のスクレイピング結果から取得するベース単価（ハコ単価）。
-        # データがない場合のための仮のデフォルト相場（東京標準）を設定
-        default_base_tanka = {
-            'ワンルーム': 4000, '1K・1DK': 4500, '1LDK': 4200, 
-            '2K・2DK': 3800, '2LDK': 3500, '3LDK': 3300
-        }
+        # 有効な間取り（データが10件以上あって解析できたもの）だけを選択肢にする
+        valid_layouts = [k for k, v in bases.items() if v > 0]
         
-        # 面積 × ベース単価 で基本家賃を計算
-        base_tanka = default_base_tanka.get(target_layout, 4000)
-        rent_base = base_tanka * i_area
-        
-        # 設備・ルールの加減算を計算
-        rent_rules = calc_rule_adjustments(i_area, i_walk, i_age, selected_features, target_layout)
-        
-        # 最終推定家賃
-        predicted_rent = rent_base + rent_rules + i_premium
+        if not valid_layouts:
+            st.error("データが少なすぎて分析可能な間取りがありません。別のデータをお試しください。")
+        else:
+            # --- 基本スペック入力 ---
+            col1, col2, col3, col4 = st.columns(4)
+            with col1: target_layout = st.selectbox("間取りタイプ", valid_layouts, index=0)
+            with col2: i_area = st.number_input("専有面積 (㎡)", min_value=10.0, max_value=200.0, value=25.0, step=0.5)
+            with col3: i_age = st.number_input("築年数 (年) ※新築は0", min_value=0, max_value=100, value=5)
+            with col4: i_walk = st.number_input("駅徒歩 (分)", min_value=0, max_value=60, value=8)
 
-        # ==========================================
-        # 相場帯・ボリュームゾーンの算出（設備を考慮しない純粋な面積の幅）
-        # ==========================================
-        # 本来は実際のSUUMOデータから算出。ここでは統計的なブレ幅から擬似計算
-        price_median = int(base_tanka * i_area)
-        price_min = int(price_median * 0.65) # 下限（約35%安）
-        price_max = int(price_median * 1.50) # 上限（約50%高）
-        zone_low = int(price_median * 0.90)  # ボリュームゾーン下限
-        zone_high = int(price_median * 1.15) # ボリュームゾーン上限
+            # --- 設備条件の入力 ---
+            st.markdown("**付加価値・設備条件（チェックで査定額に反映されます）**")
+            col5, col6, col7, col8 = st.columns(4)
+            with col5:
+                i_2f = st.checkbox("2階以上", value=True)
+                i_corner = st.checkbox("角部屋", value=False)
+                i_south = st.checkbox("南向き", value=False)
+            with col6:
+                i_bt = st.checkbox("バス・トイレ別", value=True)
+                i_sh = st.checkbox("洗面所独立", value=False)
+                i_wc = st.checkbox("温水洗浄便座", value=False)
+            with col7:
+                i_sys = st.checkbox("システムキッチン", value=False)
+                i_dry = st.checkbox("浴室乾燥機", value=False)
+                i_net = st.checkbox("インターネット無料", value=False)
+            with col8:
+                i_auto = st.checkbox("オートロック", value=True)
+                i_box = st.checkbox("宅配ボックス", value=False)
+                i_premium = st.number_input("その他・手動プレミアム (円)", value=0, step=1000)
 
-        # ==========================================
-        # 結果表示
-        # ==========================================
-        st.markdown(
-            f"""
-            <div style="background-color:#e8f4f8;padding:20px;border-radius:10px;text-align:center;margin-top:20px;">
-                <h3 style="margin:0;color:#333;">設備・条件を反映した推定家賃</h3>
-                <h1 style="margin:0;color:#0066cc;font-size:48px;">{int(predicted_rent):,} 円</h1>
-                <p style="color:#666; margin:0;">
-                (ベース家賃: {int(rent_base):,}円 ＋ AI設備加点/減点: {int(rent_rules):,}円 ＋ 手動調整: {i_premium}円)
-                </p>
-            </div>
-            """, 
-            unsafe_allow_html=True
-        )
+            # 選択された設備を辞書にまとめる
+            selected_features = {
+                '2階以上': i_2f, '角部屋': i_corner, '南向き': i_south,
+                'バス・トイレ別': i_bt, '洗面所独立': i_sh, '温水洗浄便座': i_wc,
+                'システムキッチン': i_sys, '浴室乾燥機': i_dry, 'インターネット無料': i_net,
+                'オートロック': i_auto, '宅配ボックス': i_box
+            }
 
-        st.markdown("<br><hr>", unsafe_allow_html=True)
-        st.subheader("📈 この物件の「面積（ハコ）」に対する純粋な相場帯")
-        st.caption("※設備や築年数を一切考慮せず、同じ間取り・同じ広さの物件が市場でどの価格帯で取引されているかを示します。")
+            # ==========================================
+            # 査定計算ロジック
+            # ==========================================
+            r = rules.get(target_layout, {})
+            
+            # 1. ベース家賃（対象エリアの中央値単価 × 面積）
+            tanka_base = bases.get(target_layout, 4000)
+            rent_base = tanka_base * i_area
+            
+            # 2. 加減算ロジック
+            rent_rules = 0
+            # 徒歩分数
+            if i_walk > 10:
+                rent_rules += r.get('徒歩10分超固定ペナルティ', 0)
+                rent_rules += (i_walk - 10) * r.get('徒歩10分超追加単価', 0) * i_area
+            # 築年数
+            if i_age == 0: rent_rules += r.get('築年_新築単価', 0) * i_area
+            elif 1 <= i_age <= 3: rent_rules += r.get('築年_1_3年単価', 0) * i_area
+            elif 4 <= i_age <= 6: rent_rules += r.get('築年_4_6年単価', 0) * i_area
+            elif 7 <= i_age <= 10: rent_rules += r.get('築年_7_10年単価', 0) * i_area
+            # 設備条件
+            for feat_name, is_checked in selected_features.items():
+                if is_checked:
+                    rent_rules += r.get(feat_name, 0) * i_area
+            
+            # 3. 最終推定家賃
+            predicted_rent = rent_base + rent_rules + i_premium
 
-        colA, colB, colC = st.columns(3)
-        with colA:
-            st.metric(label="最低価格目安", value=f"{price_min:,} 円")
-        with colB:
-            st.metric(label="ボリュームゾーン (上位33%〜66%)", value=f"{zone_low:,} 〜 {zone_high:,} 円", delta="相場の中核")
-        with colC:
-            st.metric(label="最高価格目安", value=f"{price_max:,} 円")
+            # ==========================================
+            # 結果表示 (上部：シミュレーター結果)
+            # ==========================================
+            st.markdown(
+                f"""
+                <div style="background-color:#e8f4f8;padding:20px;border-radius:10px;text-align:center;margin-top:20px;">
+                    <h3 style="margin:0;color:#333;">設備・条件を反映した推定家賃</h3>
+                    <h1 style="margin:0;color:#0066cc;font-size:48px;">{int(predicted_rent):,} 円</h1>
+                    <p style="color:#666; margin:0;">
+                    (エリアベース相場: {int(rent_base):,}円 ＋ AI設備加減点: {int(rent_rules):,}円 ＋ 手動調整: {i_premium}円)
+                    </p>
+                </div>
+                """, 
+                unsafe_allow_html=True
+            )
 
-        # 相場の中での立ち位置をプログレスバーで視覚化
-        st.caption(f"▼ 今回の推定家賃（{int(predicted_rent):,}円）が、市場全体のどの位置にいるかの目安")
-        progress_val = (predicted_rent - price_min) / (price_max - price_min)
-        # バーがエラーを起こさないように0.0〜1.0の範囲に収める
-        st.progress(min(1.0, max(0.0, progress_val)))
+            # ==========================================
+            # 結果表示 (下部：純粋な相場帯とボリュームゾーン)
+            # ==========================================
+            st.markdown("<br><hr>", unsafe_allow_html=True)
+            st.subheader(f"📈 面積 {i_area}㎡ の箱に対する、当該エリアの純粋な相場帯")
+            st.caption("※アップロードされたデータに基づき、設備等を考慮せず、同じ間取り・同じ広さの物件が市場でどう分布しているかを示します。")
 
+            layout_stats = stats.get(target_layout)
+            if layout_stats:
+                price_min = int(layout_stats['min_tanka'] * i_area)
+                price_max = int(layout_stats['max_tanka'] * i_area)
+                zone_low = int(layout_stats['p33_tanka'] * i_area)
+                zone_high = int(layout_stats['p67_tanka'] * i_area)
 
-if __name__ == "__main__":
-    main()
+                colA, colB, colC = st.columns(3)
+                with colA:
+                    st.metric(label="最低価格目安", value=f"{price_min:,} 円")
+                with colB:
+                    st.metric(label="ボリュームゾーン (中核33%)", value=f"{zone_low:,} 〜 {zone_high:,} 円", delta="市場の中心帯")
+                with colC:
+                    st.metric(label="最高価格目安", value=f"{price_max:,} 円")
+
+                # プログレスバーでの視覚化
+                st.caption(f"▼ 今回の推定家賃（{int(predicted_rent):,}円）が、市場全体のどの位置にいるかの目安")
+                # ゼロ除算エラーなどを防ぐ
+                if price_max > price_min:
+                    progress_val = (predicted_rent - price_min) / (price_max - price_min)
+                    st.progress(min(1.0, max(0.0, progress_val)))
+                else:
+                    st.progress(0.5)
+            else:
+                st.info("この間取りの相場分布データは取得できませんでした。")
