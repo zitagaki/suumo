@@ -3,7 +3,7 @@ import numpy as np
 import re
 import requests
 from bs4 import BeautifulSoup
-import lxml.html  # XPathを使うための強力なライブラリ
+import lxml.html 
 import time
 import random
 import streamlit as st
@@ -16,16 +16,14 @@ st.set_page_config(page_title="不動産ハイブリッド査定システム", l
 st.title("🏡 不動産ハイブリッド査定システム (AI × プロの相場観)")
 
 # =========================================================
-# 2. スクレイピングエンジン (XPath対応・詳細ページ完全巡回)
+# 2. スクレイピングエンジン (XPath対応・詳細ページ完全巡回・重複削除)
 # =========================================================
 def get_xpath_text(tree, xpath_str):
     """
-    指定されたXPathからテキストを抽出するヘルパー関数。
-    ChromeでコピーしたXPathに含まれる「tbody」のズレを自動補正します。
+    指定されたXPathからテキストを抽出するヘルパー関数
     """
     try:
         elements = tree.xpath(xpath_str)
-        # 生のHTMLにtbodyが無いケースの自動補正
         if not elements and '/tbody' in xpath_str:
             elements = tree.xpath(xpath_str.replace('/tbody', ''))
             
@@ -136,11 +134,8 @@ def scrape_suumo_list(base_url, max_pages=3):
                         full_url = ""
                         suumo_code = ""
 
-                    # ==========================================
-                    # 💡 詳細ページへのアクセスとXPath抽出
-                    # ==========================================
                     kouzou = chiku_nengetsu = taiyou = setsubi = shop_name = ""
-                    detail_dict = {} # XPathが失敗した時用の保険
+                    detail_dict = {}
 
                     if full_url:
                         try:
@@ -148,42 +143,36 @@ def scrape_suumo_list(base_url, max_pages=3):
                             d_res = session.get(full_url, headers=headers, timeout=10)
                             d_tree = lxml.html.fromstring(d_res.content)
                             
-                            # ① ユーザー指定のダイレクトXPathで取得
                             kouzou = get_xpath_text(d_tree, '//*[@id="contents"]/div[4]/table/tbody/tr[1]/td[2]')
                             chiku_nengetsu = get_xpath_text(d_tree, '//*[@id="contents"]/div[4]/table/tbody/tr[2]/td[2]')
                             taiyou = get_xpath_text(d_tree, '//*[@id="contents"]/div[4]/table/tbody/tr[6]/td[2]')
                             
-                            # 設備（liのリストを「、」で結合）
                             setsubi_elements = d_tree.xpath('//*[@id="bkdt-option"]/div/ul/li')
                             if setsubi_elements:
                                 setsubi = "、".join([el.text_content().strip() for el in setsubi_elements])
                             
-                            # 店舗（2パターンのXPathを試行）
                             shop_name = get_xpath_text(d_tree, '//*[@id="contents"]/div[5]/div/div/div[1]/div[2]/div/div[2]/div/div[1]')
                             if not shop_name:
                                 shop_name = get_xpath_text(d_tree, '//*[@id="contents"]/div[6]/div/div/p[1]/a')
 
-                            # ② 汎用的な表データ（<th> -> <td>）を取得（保険 ＆ 駐車場・備考などのため）
                             for table in d_tree.xpath('//table'):
                                 for tr in table.xpath('.//tr'):
                                     ths = tr.xpath('.//th')
-                                    tds = tr.xpath('.//td')
-                                    for i in range(min(len(ths), len(tds))):
+                                    tds_detail = tr.xpath('.//td')
+                                    for i in range(min(len(ths), len(tds_detail))):
                                         k = ths[i].text_content().strip()
-                                        v = re.sub(r'\s+', ' ', tds[i].text_content()).strip()
+                                        v = re.sub(r'\s+', ' ', tds_detail[i].text_content()).strip()
                                         detail_dict[k] = v
                                         
                         except Exception:
                             pass
 
-                    # 取得結果の確定（XPathで空だったら汎用辞書から補完する二段構え）
                     kouzou = kouzou or detail_dict.get("構造", "")
                     chiku_nengetsu = chiku_nengetsu or detail_dict.get("築年月", "")
                     taiyou = taiyou or detail_dict.get("取引態様", detail_dict.get("態様", ""))
                     setsubi = setsubi or detail_dict.get("部屋の特徴・設備", detail_dict.get("設備", ""))
                     shop_name = shop_name or detail_dict.get("取り扱い店舗", "")
 
-                    # 指定された34項目でデータを構築（不要な6項目は除外）
                     all_data.append({
                         "物件名": title,
                         "家賃": rent.text.strip() if rent else "",
@@ -229,13 +218,29 @@ def scrape_suumo_list(base_url, max_pages=3):
             
     progress_bar.empty()
     status_text.success("✅ 全ての詳細データの取得が完了しました！")
-    return pd.DataFrame(all_data)
+    
+    df = pd.DataFrame(all_data)
+    
+    # =========================================================
+    # 💡 ユーザー要望：重複データの完全削除ロジック
+    # =========================================================
+    if not df.empty:
+        before_count = len(df)
+        # 指定された6項目が「全て完全一致」する場合のみ、重複とみなして1件だけ残す
+        df = df.drop_duplicates(subset=['物件名', '家賃', '共益費', '間取り', '専有面積', '階建'], keep='first')
+        after_count = len(df)
+        removed_count = before_count - after_count
+        
+        if removed_count > 0:
+            st.info(f"✨ 自動クレンジング: 複数会社から出稿されていた同一物件の重複を {removed_count} 件 削除しました。（取得実数: {after_count}件）")
+            
+    return df
 
 # =========================================================
 # 3. 前処理・データ読み込みエンジン
 # =========================================================
 @st.cache_data
-def analyze_real_estate_data_v10(raw_df, rules_file):
+def analyze_real_estate_data_v11(raw_df, rules_file):
     df_rules = pd.read_csv(rules_file)
     extracted_rules = {}
     madori_list = ['ワンルーム', '1K・1DK', '1LDK', '2K・2DK', '2LDK', '3K・3DK', '3LDK']
@@ -349,7 +354,7 @@ with tab1:
                     scraped_df = scrape_suumo_list(target_url, max_pages)
                     if not scraped_df.empty:
                         st.session_state['raw_df'] = scraped_df
-                        st.success(f"✅ {len(scraped_df)}件の物件データを取得しました！")
+                        st.success("✅ データの取得と重複クレンジングが完了しました！")
                     else:
                         st.error("データの取得に失敗しました。URLが正しいか確認してください。")
             else:
@@ -363,7 +368,7 @@ with tab1:
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
                 df_raw.to_excel(writer, index=False)
-            st.download_button(label="📥 取得したデータをExcelで保存", data=buffer.getvalue(), file_name="suumo_scraped_data_refined.xlsx", mime="application/vnd.ms-excel")
+            st.download_button(label="📥 取得したデータをExcelで保存（重複削除済み）", data=buffer.getvalue(), file_name="suumo_scraped_data_deduplicated.xlsx", mime="application/vnd.ms-excel")
 
     else:
         uploaded_suumo = st.file_uploader("SUUMO物件データ (Excel/CSV)", type=["xlsx", "csv"])
@@ -381,7 +386,7 @@ with tab1:
     if df_raw is not None and uploaded_rules is not None:
         if st.button("🧠 解析してシミュレーターを起動"):
             with st.spinner("データを解析し、駅ごとの相場とルールを構築しています..."):
-                extracted_rules, df_suumo = analyze_real_estate_data_v10(df_raw, uploaded_rules)
+                extracted_rules, df_suumo = analyze_real_estate_data_v11(df_raw, uploaded_rules)
                 
                 st.session_state['rules'] = extracted_rules
                 st.session_state['df_suumo'] = df_suumo
