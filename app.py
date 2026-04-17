@@ -346,7 +346,7 @@ with tab1:
     
     if data_source == "🌐 SUUMOのURLから自動取得 (スクレイピング)":
         target_url = st.text_input("SUUMOの検索結果URLを貼り付けてください", placeholder="https://suumo.jp/jj/chintai/ichiran/...")
-        max_pages = st.number_input("取得する最大ページ数", min_value=1, max_value=20, value=3)
+        max_pages = st.number_input("取得する最大ページ数", min_value=1, max_value=100, value=3)
         
         if st.button("🚀 データを取得する"):
             if target_url:
