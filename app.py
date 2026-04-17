@@ -3,6 +3,7 @@ import numpy as np
 import re
 import requests
 from bs4 import BeautifulSoup
+import lxml.html  # XPathを使うための強力なライブラリ
 import time
 import random
 import streamlit as st
@@ -15,13 +16,30 @@ st.set_page_config(page_title="不動産ハイブリッド査定システム", l
 st.title("🏡 不動産ハイブリッド査定システム (AI × プロの相場観)")
 
 # =========================================================
-# 2. スクレイピングエンジン (SUUMO詳細ページ完全巡回仕様)
+# 2. スクレイピングエンジン (XPath対応・詳細ページ完全巡回)
 # =========================================================
+def get_xpath_text(tree, xpath_str):
+    """
+    指定されたXPathからテキストを抽出するヘルパー関数。
+    ChromeでコピーしたXPathに含まれる「tbody」のズレを自動補正します。
+    """
+    try:
+        elements = tree.xpath(xpath_str)
+        # 生のHTMLにtbodyが無いケースの自動補正
+        if not elements and '/tbody' in xpath_str:
+            elements = tree.xpath(xpath_str.replace('/tbody', ''))
+            
+        if elements:
+            if isinstance(elements[0], str):
+                return elements[0].strip()
+            else:
+                text = elements[0].text_content()
+                return re.sub(r'\s+', ' ', text).strip()
+    except Exception:
+        pass
+    return ""
+
 def scrape_suumo_list(base_url, max_pages=3):
-    """
-    SUUMOの検索結果から、さらに各部屋の「詳細ページ」まで潜り込み、
-    ご要望の全40項目フォーマットを完璧に取得する強力なクローラー
-    """
     all_data = []
     
     session = requests.Session()
@@ -33,7 +51,6 @@ def scrape_suumo_list(base_url, max_pages=3):
         'Connection': 'keep-alive'
     }
     
-    # URL自動補正（HTML構造のズレを防ぐため、確実に「物件ごとに表示」へ変換）
     base_url = base_url.replace('FR301FC005', 'FR301FC001')
     base_url = base_url.replace('FR301FC006', 'FR301FC001')
     base_url = base_url.replace('FR301FC007', 'FR301FC001')
@@ -49,7 +66,6 @@ def scrape_suumo_list(base_url, max_pages=3):
         url = f"{base_url}{separator}pn={page}"
         
         try:
-            # ブロック回避のためのランダム待機
             time.sleep(random.uniform(1.0, 2.0))
             
             res = session.get(url, headers=headers, timeout=15)
@@ -60,15 +76,13 @@ def scrape_suumo_list(base_url, max_pages=3):
             items = soup.find_all("div", class_="cassetteitem")
             
             if not items:
-                st.warning(f"⚠️ ページ {page} から物件データを抽出できませんでした。データが終了した可能性があります。")
+                st.warning(f"⚠️ ページ {page} から物件データを抽出できませんでした。")
                 break
                 
-            # 進捗表示のための件数カウント
             total_rooms = sum([len(item.find_all("tbody")) for item in items])
             room_count = 0
             
             for item in items:
-                # 物件の基本情報
                 title_elem = item.find("div", class_="cassetteitem_content-title")
                 title = title_elem.text.strip() if title_elem else ""
                 
@@ -91,11 +105,10 @@ def scrape_suumo_list(base_url, max_pages=3):
                 age = col3_divs[0].text.strip() if len(col3_divs) > 0 else ""
                 bldg_floors = col3_divs[1].text.strip() if len(col3_divs) > 1 else ""
                 
-                # 部屋ごとのループ
                 tbodies = item.find_all("tbody")
                 for tbody in tbodies:
                     room_count += 1
-                    status_text.text(f"🚀 SUUMOからデータ収集＆詳細ページ巡回中... (P{page} : {room_count}/{total_rooms}部屋目)")
+                    status_text.text(f"🚀 詳細ページから全項目を精密抽出中... (P{page} : {room_count}/{total_rooms}部屋目)")
                     
                     rent = tbody.find("span", class_="cassetteitem_price cassetteitem_price--rent")
                     admin = tbody.find("span", class_="cassetteitem_price cassetteitem_price--administration")
@@ -113,7 +126,6 @@ def scrape_suumo_list(base_url, max_pages=3):
                             
                     combined_floors = f"{room_floor}/{bldg_floors}" if room_floor and bldg_floors else bldg_floors
                     
-                    # 💡URLとSUUMOコードの確実な取得（文字化けバグを修正）
                     a_tag = tbody.find("a", href=re.compile(r'/chintai/(jnc|bc)_'))
                     if a_tag:
                         url_href = a_tag.get("href")
@@ -124,38 +136,54 @@ def scrape_suumo_list(base_url, max_pages=3):
                         full_url = ""
                         suumo_code = ""
 
-                    # 💡【重要】詳細ページ（奥のページ）へのアクセスとデータ抽出
-                    detail_data = {}
+                    # ==========================================
+                    # 💡 詳細ページへのアクセスとXPath抽出
+                    # ==========================================
+                    kouzou = chiku_nengetsu = taiyou = setsubi = shop_name = ""
+                    detail_dict = {} # XPathが失敗した時用の保険
+
                     if full_url:
                         try:
-                            # ブロックされないよう、ほんの一瞬だけ待機（0.3秒〜0.8秒）
                             time.sleep(random.uniform(0.3, 0.8))
                             d_res = session.get(full_url, headers=headers, timeout=10)
-                            d_res.encoding = d_res.apparent_encoding
-                            d_soup = BeautifulSoup(d_res.content, 'html.parser')
+                            d_tree = lxml.html.fromstring(d_res.content)
                             
-                            # 詳細ページ内のテーブル表から項目を根こそぎ取得
-                            for table in d_soup.find_all("table"):
-                                for tr in table.find_all("tr"):
-                                    th = tr.find("th")
-                                    td = tr.find("td")
-                                    if th and td:
-                                        k = th.text.strip()
-                                        v = re.sub(r'\s+', ' ', td.text.strip())
-                                        detail_data[k] = v
+                            # ① ユーザー指定のダイレクトXPathで取得
+                            kouzou = get_xpath_text(d_tree, '//*[@id="contents"]/div[4]/table/tbody/tr[1]/td[2]')
+                            chiku_nengetsu = get_xpath_text(d_tree, '//*[@id="contents"]/div[4]/table/tbody/tr[2]/td[2]')
+                            taiyou = get_xpath_text(d_tree, '//*[@id="contents"]/div[4]/table/tbody/tr[6]/td[2]')
+                            
+                            # 設備（liのリストを「、」で結合）
+                            setsubi_elements = d_tree.xpath('//*[@id="bkdt-option"]/div/ul/li')
+                            if setsubi_elements:
+                                setsubi = "、".join([el.text_content().strip() for el in setsubi_elements])
+                            
+                            # 店舗（2パターンのXPathを試行）
+                            shop_name = get_xpath_text(d_tree, '//*[@id="contents"]/div[5]/div/div/div[1]/div[2]/div/div[2]/div/div[1]')
+                            if not shop_name:
+                                shop_name = get_xpath_text(d_tree, '//*[@id="contents"]/div[6]/div/div/p[1]/a')
+
+                            # ② 汎用的な表データ（<th> -> <td>）を取得（保険 ＆ 駐車場・備考などのため）
+                            for table in d_tree.xpath('//table'):
+                                for tr in table.xpath('.//tr'):
+                                    ths = tr.xpath('.//th')
+                                    tds = tr.xpath('.//td')
+                                    for i in range(min(len(ths), len(tds))):
+                                        k = ths[i].text_content().strip()
+                                        v = re.sub(r'\s+', ' ', tds[i].text_content()).strip()
+                                        detail_dict[k] = v
+                                        
                         except Exception:
-                            pass # 万が一詳細ページが取得できなくてもエラーで止めずに進む
+                            pass
 
-                    # 取扱店舗名
-                    company = detail_data.get("取り扱い店舗", "")
-                    if not company and len(tds) > 0:
-                        company = tds[-1].text.strip()
+                    # 取得結果の確定（XPathで空だったら汎用辞書から補完する二段構え）
+                    kouzou = kouzou or detail_dict.get("構造", "")
+                    chiku_nengetsu = chiku_nengetsu or detail_dict.get("築年月", "")
+                    taiyou = taiyou or detail_dict.get("取引態様", detail_dict.get("態様", ""))
+                    setsubi = setsubi or detail_dict.get("部屋の特徴・設備", detail_dict.get("設備", ""))
+                    shop_name = shop_name or detail_dict.get("取り扱い店舗", "")
 
-                    # 設備の取得（複数パターンの表記ゆれに対応）
-                    setsubi = detail_data.get("特徴・設備", detail_data.get("設備", detail_data.get("部屋の特徴・設備", "")))
-                    bikou = detail_data.get("備考", detail_data.get("備考・特記事項", ""))
-
-                    # 💡ご指定の全40項目フォーマットに完全にハメ込む
+                    # 指定された34項目でデータを構築（不要な6項目は除外）
                     all_data.append({
                         "物件名": title,
                         "家賃": rent.text.strip() if rent else "",
@@ -170,32 +198,26 @@ def scrape_suumo_list(base_url, max_pages=3):
                         "最寄駅2": sta2,
                         "最寄駅3": sta3,
                         "住所": address,
-                        "階建": detail_data.get("階建", combined_floors),
-                        "構造": detail_data.get("構造", ""),
-                        "築年月": detail_data.get("築年月", ""),
+                        "階建": detail_dict.get("階建", combined_floors),
+                        "構造": kouzou,
+                        "築年月": chiku_nengetsu,
                         "設備": setsubi,
-                        "損保": detail_data.get("損保", ""),
-                        "駐車場": detail_data.get("駐車場", ""),
-                        "入居時期": detail_data.get("入居", detail_data.get("入居可能日", "")),
-                        "態様": detail_data.get("取引態様", ""),
-                        "条件": detail_data.get("条件", ""),
+                        "損保": detail_dict.get("損保", ""),
+                        "駐車場": detail_dict.get("駐車場", ""),
+                        "入居時期": detail_dict.get("入居可能日", detail_dict.get("入居", "")),
+                        "態様": taiyou,
+                        "条件": detail_dict.get("条件", ""),
                         "suumoコード": suumo_code,
-                        "情報更新日": detail_data.get("情報更新日", ""),
-                        "契約期間": detail_data.get("契約期間", ""),
-                        "保証会社": detail_data.get("保証会社", ""),
-                        "ほか諸費用": detail_data.get("ほか諸費用", ""),
-                        "備考": bikou,
-                        "店舗": company,
-                        "間取り詳細": detail_data.get("間取り詳細", ""),
-                        "エネルギー消費性能": detail_data.get("エネルギー消費性能", ""),
-                        "断熱性能": detail_data.get("断熱性能", ""),
-                        "目安光熱費": detail_data.get("目安光熱費", ""),
-                        "総戸数": detail_data.get("総戸数", ""),
-                        "次回更新予定日": detail_data.get("次回更新予定日", ""),
-                        "仲介手数料": detail_data.get("仲介手数料", ""),
-                        "ほか初期費用": detail_data.get("ほか初期費用", ""),
-                        "敷金積み増し": detail_data.get("敷金積み増し", ""),
-                        "バルコニー面積": detail_data.get("バルコニー面積", ""),
+                        "情報更新日": detail_dict.get("情報更新日", ""),
+                        "契約期間": detail_dict.get("契約期間", ""),
+                        "保証会社": detail_dict.get("保証会社", ""),
+                        "ほか諸費用": detail_dict.get("ほか諸費用", ""),
+                        "備考": detail_dict.get("備考・特記事項", detail_dict.get("備考", "")),
+                        "店舗": shop_name,
+                        "間取り詳細": detail_dict.get("間取り詳細", ""),
+                        "ほか初期費用": detail_dict.get("ほか初期費用", ""),
+                        "敷金積み増し": detail_dict.get("敷金積み増し", ""),
+                        "バルコニー面積": detail_dict.get("バルコニー面積", ""),
                         "URL": full_url
                     })
             
@@ -213,11 +235,7 @@ def scrape_suumo_list(base_url, max_pages=3):
 # 3. 前処理・データ読み込みエンジン
 # =========================================================
 @st.cache_data
-def analyze_real_estate_data_v9(raw_df, rules_file):
-    """
-    スクレイピングしたDF、またはアップロードしたDFを受け取り、
-    ルールCSVと掛け合わせて分析可能な状態にクレンジングする
-    """
+def analyze_real_estate_data_v10(raw_df, rules_file):
     df_rules = pd.read_csv(rules_file)
     extracted_rules = {}
     madori_list = ['ワンルーム', '1K・1DK', '1LDK', '2K・2DK', '2LDK', '3K・3DK', '3LDK']
@@ -345,7 +363,7 @@ with tab1:
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
                 df_raw.to_excel(writer, index=False)
-            st.download_button(label="📥 取得したデータをExcelで保存", data=buffer.getvalue(), file_name="suumo_scraped_data_full.xlsx", mime="application/vnd.ms-excel")
+            st.download_button(label="📥 取得したデータをExcelで保存", data=buffer.getvalue(), file_name="suumo_scraped_data_refined.xlsx", mime="application/vnd.ms-excel")
 
     else:
         uploaded_suumo = st.file_uploader("SUUMO物件データ (Excel/CSV)", type=["xlsx", "csv"])
@@ -363,7 +381,7 @@ with tab1:
     if df_raw is not None and uploaded_rules is not None:
         if st.button("🧠 解析してシミュレーターを起動"):
             with st.spinner("データを解析し、駅ごとの相場とルールを構築しています..."):
-                extracted_rules, df_suumo = analyze_real_estate_data_v9(df_raw, uploaded_rules)
+                extracted_rules, df_suumo = analyze_real_estate_data_v10(df_raw, uploaded_rules)
                 
                 st.session_state['rules'] = extracted_rules
                 st.session_state['df_suumo'] = df_suumo
@@ -429,18 +447,11 @@ with tab2:
             'オートロック': i_auto, '宅配ボックス': i_box
         }
 
-        # ==========================================
         # ベース相場の取得
-        # ==========================================
         mask_base = (df_suumo['間取りグループ'] == target_layout)
-        
-        if selected_station != '指定なし':
-            mask_base &= (df_suumo['駅名'] == selected_station)
-
-        if i_btype == 'マンション':
-            mask_base &= df_suumo['建物種別_判定用'].str.contains('マンション', na=False)
-        elif i_btype == 'アパート':
-            mask_base &= df_suumo['建物種別_判定用'].str.contains('アパート', na=False)
+        if selected_station != '指定なし': mask_base &= (df_suumo['駅名'] == selected_station)
+        if i_btype == 'マンション': mask_base &= df_suumo['建物種別_判定用'].str.contains('マンション', na=False)
+        elif i_btype == 'アパート': mask_base &= df_suumo['建物種別_判定用'].str.contains('アパート', na=False)
 
         tanka_series_base = df_suumo[mask_base][tanka_col].dropna()
         
@@ -450,7 +461,6 @@ with tab2:
             mask_fallback = (df_suumo['間取りグループ'] == target_layout)
             if i_btype in ['マンション', 'アパート']:
                 mask_fallback &= df_suumo['建物種別_判定用'].str.contains(i_btype, na=False)
-            
             tanka_series_fb = df_suumo[mask_fallback][tanka_col].dropna()
             if len(tanka_series_fb) > 0:
                 tanka_base = tanka_series_fb.median()
@@ -460,9 +470,7 @@ with tab2:
                 if pd.isna(tanka_base): tanka_base = 4000
                 st.warning(f"⚠️ {i_btype}のデータが見つからないため、全体の相場を使用しています。")
 
-        # ==========================================
         # 計算ロジック
-        # ==========================================
         r = rules.get(target_layout, {})
         rent_base = tanka_base * i_area
         rent_rules = 0
@@ -490,15 +498,11 @@ with tab2:
         
         predicted_rent = int(rent_base + rent_rules + i_premium)
 
-        # ==========================================
-        # 画面下部統計と上限キャップ
-        # ==========================================
+        # 画面下部統計
         station_label = "当該エリア全体" if selected_station == '指定なし' else f"{selected_station}駅周辺"
-        if i_btype != '指定なし':
-            station_label += f"（{i_btype}）"
+        if i_btype != '指定なし': station_label += f"（{i_btype}）"
             
         data_count = len(tanka_series_base)
-
         display_rent = predicted_rent
         cap_message = "" 
         
@@ -514,9 +518,7 @@ with tab2:
         else:
             price_min = price_max = zone_low = zone_high = 0
 
-        # ==========================================
         # 結果表示
-        # ==========================================
         st.markdown(
             f"""
             <div style="background-color:#e8f4f8;padding:20px;border-radius:10px;text-align:center;margin-top:20px;">
@@ -536,12 +538,9 @@ with tab2:
 
         if data_count > 0:
             colA, colB, colC = st.columns(3)
-            with colA:
-                st.metric(label="最低価格目安", value=f"{price_min:,} 円")
-            with colB:
-                st.metric(label="ボリュームゾーン (中核33%)", value=f"{zone_low:,} 〜 {zone_high:,} 円", delta="市場の中心帯")
-            with colC:
-                st.metric(label="最高価格目安", value=f"{price_max:,} 円")
+            with colA: st.metric(label="最低価格目安", value=f"{price_min:,} 円")
+            with colB: st.metric(label="ボリュームゾーン (中核33%)", value=f"{zone_low:,} 〜 {zone_high:,} 円", delta="市場の中心帯")
+            with colC: st.metric(label="最高価格目安", value=f"{price_max:,} 円")
 
             st.caption(f"▼ 今回の推定家賃（{display_rent:,}円）が、市場全体のどの位置にいるかの目安")
             if price_max > price_min:
