@@ -12,8 +12,9 @@ st.title("🏡 不動産ハイブリッド査定システム (AI × プロの相
 # =========================================================
 # 2. 前処理・データ読み込みエンジン
 # =========================================================
+# キャッシュをクリアするために関数名をv5に更新しています
 @st.cache_data
-def analyze_real_estate_data_v4(suumo_file, rules_file):
+def analyze_real_estate_data_v5(suumo_file, rules_file):
     """
     どんな形式の不動産データ（列名違い）でも自動で項目を探し出し、
     駅ごとの相場や面積単価を算出する強力なエンジン
@@ -110,6 +111,15 @@ def analyze_real_estate_data_v4(suumo_file, rules_file):
     else:
         df_suumo['間取りグループ'] = '1K・1DK'
 
+    # --- 💡 建物種別（マンション・アパート）判定用の抽出 ---
+    type_col = next((c for c in df_suumo.columns if '建物種別' in str(c) or '種別' in str(c)), None)
+    if type_col:
+        df_suumo['建物種別_判定用'] = df_suumo[type_col].astype(str)
+    else:
+        # 万が一列名が見つからない場合は、全テキスト列を結合して文字検索の対象にする
+        text_cols = df_suumo.select_dtypes(include=[object]).fillna('').agg(' '.join, axis=1)
+        df_suumo['建物種別_判定用'] = text_cols
+
     # ---------------------------------------------------------
     # ③ 駅名の超強力な自動抽出
     # ---------------------------------------------------------
@@ -184,7 +194,7 @@ with tab1:
 
     if uploaded_suumo is not None and uploaded_rules is not None:
         with st.spinner("データを解析し、駅ごとの相場とルールを構築しています..."):
-            extracted_rules, df_suumo = analyze_real_estate_data_v4(uploaded_suumo, uploaded_rules)
+            extracted_rules, df_suumo = analyze_real_estate_data_v5(uploaded_suumo, uploaded_rules)
             
             st.session_state['rules'] = extracted_rules
             st.session_state['df_suumo'] = df_suumo
@@ -219,8 +229,6 @@ with tab2:
         with col5: i_walk = st.number_input("駅徒歩 (分)", min_value=0, max_value=60, value=8)
 
         st.markdown("**建物種別 ＆ 設備条件（選択で査定額に反映されます）**")
-        
-        # --- 💡追加：建物種別の選択 ---
         i_btype = st.radio("建物種別", ["指定なし", "マンション", "アパート"], horizontal=True)
         
         col5, col6, col7, col8 = st.columns(4)
@@ -232,7 +240,6 @@ with tab2:
             i_bt = st.checkbox("バス・トイレ別", value=True)
             i_sh = st.checkbox("洗面所独立", value=False)
             i_wc = st.checkbox("温水洗浄便座", value=False)
-            # --- 💡追加：追い焚き風呂の選択 ---
             i_oidaki = st.checkbox("追い焚き風呂", value=False)
         with col7:
             i_sys = st.checkbox("システムキッチン", value=False)
@@ -243,7 +250,6 @@ with tab2:
             i_box = st.checkbox("宅配ボックス", value=False)
             i_premium = st.number_input("その他・手動プレミアム (円)", value=0, step=1000)
 
-        # 辞書のキーと画面上の状態を紐付け（ルールCSVの項目名と一致させます）
         selected_features = {
             'マンション': i_btype == 'マンション',
             'アパート': i_btype == 'アパート',
@@ -255,45 +261,26 @@ with tab2:
         }
 
         # ==========================================
-        # 査定計算ロジック（駅による相場の絞り込み）
+        # 査定計算用ベース相場の取得（計算バグを防ぐため種別は絞らない）
         # ==========================================
-        if selected_station == '指定なし':
-            df_filtered = df_suumo[df_suumo['間取りグループ'] == target_layout]
-            station_label = "当該エリア全体"
-        else:
-            df_filtered = df_suumo[(df_suumo['間取りグループ'] == target_layout) & (df_suumo['駅名'] == selected_station)]
-            station_label = f"{selected_station}駅周辺"
+        # ※計算ベースは「マンション・アパートが混ざった全体の平均」を使います。
+        # なぜなら、CSVのルール（＋3000円など）を足すため、最初からマンション限定の相場にすると二重計算で高くなりすぎるためです。
+        mask_base = (df_suumo['間取りグループ'] == target_layout)
+        if selected_station != '指定なし':
+            mask_base &= (df_suumo['駅名'] == selected_station)
 
-        tanka_series = df_filtered['㎡単価'].dropna()
-        data_count = len(tanka_series)
-        
-        if data_count > 0:
-            tanka_base = tanka_series.median()
-            layout_stats = {
-                'min_tanka': tanka_series.min(),
-                'max_tanka': tanka_series.max(),
-                'p33_tanka': tanka_series.quantile(0.333),
-                'p67_tanka': tanka_series.quantile(0.667)
-            }
+        tanka_series_base = df_suumo[mask_base]['㎡単価'].dropna()
+        if len(tanka_series_base) > 0:
+            tanka_base = tanka_series_base.median()
         else:
-            df_all = df_suumo[df_suumo['間取りグループ'] == target_layout]
-            tanka_all = df_all['㎡単価'].dropna()
-            if len(tanka_all) > 0:
-                tanka_base = tanka_all.median()
-                st.warning(f"⚠️ 指定された「{selected_station}駅」には「{target_layout}」のデータが存在しないため、ベース家賃はエリア全体の相場を使用しています。")
-                layout_stats = None
-                data_count = len(tanka_all)
-            else:
-                tanka_base = 4000
-                layout_stats = None
-                data_count = 0
+            tanka_base = df_suumo[df_suumo['間取りグループ'] == target_layout]['㎡単価'].dropna().median()
+            if pd.isna(tanka_base): tanka_base = 4000
 
+        # ==========================================
+        # 計算ロジック（ベース相場 ＋ ルール加減算）
+        # ==========================================
         r = rules.get(target_layout, {})
-        
-        # 1. ハコ自体の家賃
         rent_base = tanka_base * i_area
-        
-        # 2. 加点・減点の計算
         rent_rules = 0
         
         tanka_under_10 = r.get('徒歩10分以内単価', 0)
@@ -317,15 +304,53 @@ with tab2:
                 feat_tanka = r.get(feat_name, 0)
                 rent_rules += feat_tanka * i_area
         
-        # 3. 理論上の推定家賃
         predicted_rent = int(rent_base + rent_rules + i_premium)
 
         # ==========================================
-        # 相場分布の取得と上限（キャップ）処理
+        # 💡画面下部：相場帯（メーター）用の絞り込み
         # ==========================================
+        mask_market = (df_suumo['間取りグループ'] == target_layout)
+        station_label = "当該エリア全体" if selected_station == '指定なし' else f"{selected_station}駅周辺"
+        
+        if selected_station != '指定なし':
+            mask_market &= (df_suumo['駅名'] == selected_station)
+
+        # ユーザーが指定した建物種別で、メーターの元データを絞り込む
+        if i_btype == 'マンション':
+            mask_market &= df_suumo['建物種別_判定用'].str.contains('マンション', na=False)
+            station_label += "（マンション）"
+        elif i_btype == 'アパート':
+            mask_market &= df_suumo['建物種別_判定用'].str.contains('アパート', na=False)
+            station_label += "（アパート）"
+
+        tanka_series_market = df_suumo[mask_market]['㎡単価'].dropna()
+        data_count = len(tanka_series_market)
+        
+        if data_count > 0:
+            layout_stats = {
+                'min_tanka': tanka_series_market.min(),
+                'max_tanka': tanka_series_market.max(),
+                'p33_tanka': tanka_series_market.quantile(0.333),
+                'p67_tanka': tanka_series_market.quantile(0.667)
+            }
+        else:
+            # もし「指定された駅のアパート」などが0件だった場合、種別指定なしのデータで代用する安全設計
+            if len(tanka_series_base) > 0:
+                layout_stats = {
+                    'min_tanka': tanka_series_base.min(),
+                    'max_tanka': tanka_series_base.max(),
+                    'p33_tanka': tanka_series_base.quantile(0.333),
+                    'p67_tanka': tanka_series_base.quantile(0.667)
+                }
+                data_count = len(tanka_series_base)
+                st.warning(f"⚠️ 指定された「{station_label}」のデータが0件のため、下のメーターは【種別指定なし（{data_count}件）】の相場を代用表示しています。")
+            else:
+                layout_stats = None
+                data_count = 0
+
+        # 上限キャップ処理
         display_rent = predicted_rent
         cap_message = "" 
-
         if layout_stats:
             price_min = int(layout_stats['min_tanka'] * i_area)
             price_max = int(layout_stats['max_tanka'] * i_area)
