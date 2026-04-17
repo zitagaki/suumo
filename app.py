@@ -1,7 +1,11 @@
 import pandas as pd
 import numpy as np
 import re
+import requests
+from bs4 import BeautifulSoup
+import time
 import streamlit as st
+import io
 
 # =========================================================
 # 1. ページ設定
@@ -10,17 +14,109 @@ st.set_page_config(page_title="不動産ハイブリッド査定システム", l
 st.title("🏡 不動産ハイブリッド査定システム (AI × プロの相場観)")
 
 # =========================================================
-# 2. 前処理・データ読み込みエンジン
+# 2. スクレイピングエンジン (SUUMO一覧ページから直接取得)
+# =========================================================
+def scrape_suumo_list(base_url, max_pages=3):
+    """
+    SUUMOの検索結果URLから、指定したページ数分の物件情報をスクレイピングする
+    """
+    all_data = []
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+    
+    # ページネーション処理
+    base_url = re.sub(r'&page=\d+', '', base_url) # 既存のpageパラメータを除去
+    separator = '&' if '?' in base_url else '?'
+    
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    for page in range(1, max_pages + 1):
+        status_text.text(f"SUUMOからデータを取得中... (ページ {page}/{max_pages})")
+        url = f"{base_url}{separator}page={page}"
+        
+        try:
+            res = requests.get(url, headers=headers)
+            soup = BeautifulSoup(res.text, 'html.parser')
+            items = soup.find_all("div", class_="cassetteitem")
+            
+            if not items:
+                break # データがなくなったら終了
+            
+            for item in items:
+                # 物件の基本情報
+                title_elem = item.find("div", class_="cassetteitem_content-title")
+                title = title_elem.text.strip() if title_elem else ""
+                
+                # マンション・アパートの取得
+                b_type_elem = item.find("div", class_="cassetteitem_content-label")
+                b_type_raw = b_type_elem.text.strip() if b_type_elem else ""
+                if "アパート" in b_type_raw: b_type = "アパート"
+                elif "マンション" in b_type_raw: b_type = "マンション"
+                else: b_type = "その他"
+                
+                address_elem = item.find("li", class_="cassetteitem_detail-col1")
+                address = address_elem.text.strip() if address_elem else ""
+                
+                # 駅・沿線情報の取得 (沿線/駅 歩X分)
+                stations = item.find_all("div", class_="cassetteitem_detail-text")
+                sta1 = stations[0].text.strip() if len(stations) > 0 else ""
+                sta2 = stations[1].text.strip() if len(stations) > 1 else ""
+                sta3 = stations[2].text.strip() if len(stations) > 2 else ""
+                
+                col3 = item.find("li", class_="cassetteitem_detail-col3")
+                col3_divs = col3.find_all("div") if col3 else []
+                age = col3_divs[0].text.strip() if len(col3_divs) > 0 else ""
+                floors = col3_divs[1].text.strip() if len(col3_divs) > 1 else ""
+                
+                # 部屋ごとの情報（複数行ある場合に対応）
+                tbodies = item.find_all("tbody")
+                for tbody in tbodies:
+                    rent = tbody.find("span", class_="cassetteitem_price cassetteitem_price--rent")
+                    admin = tbody.find("span", class_="cassetteitem_price cassetteitem_price--administration")
+                    deposit = tbody.find("span", class_="cassetteitem_price cassetteitem_price--deposit")
+                    gratuity = tbody.find("span", class_="cassetteitem_price cassetteitem_price--gratuity")
+                    layout = tbody.find("span", class_="cassetteitem_madori")
+                    area = tbody.find("span", class_="cassetteitem_menseki")
+                    
+                    all_data.append({
+                        "物件名": title,
+                        "家賃": rent.text.strip() if rent else "",
+                        "共益費": admin.text.strip() if admin else "",
+                        "敷金": deposit.text.strip() if deposit else "",
+                        "礼金": gratuity.text.strip() if gratuity else "",
+                        "間取り": layout.text.strip() if layout else "",
+                        "専有面積": area.text.strip() if area else "",
+                        "建物種別": b_type,
+                        "築年数": age,
+                        "最寄駅1": sta1,
+                        "最寄駅2": sta2,
+                        "最寄駅3": sta3,
+                        "住所": address,
+                        "階建": floors
+                    })
+            
+            progress_bar.progress(page / max_pages)
+            time.sleep(1) # サーバー負荷軽減のため1秒待機
+            
+        except Exception as e:
+            st.error(f"スクレイピング中にエラーが発生しました: {e}")
+            break
+            
+    progress_bar.empty()
+    status_text.empty()
+    return pd.DataFrame(all_data)
+
+# =========================================================
+# 3. 前処理・データ読み込みエンジン
 # =========================================================
 @st.cache_data
-def analyze_real_estate_data_v6(suumo_file, rules_file):
+def analyze_real_estate_data_v7(raw_df, rules_file):
     """
-    どんな形式の不動産データ（列名違い）でも自動で項目を探し出し、
-    駅ごとの相場や面積単価を算出する強力なエンジン
+    スクレイピングしたDF、またはアップロードしたDFを受け取り、
+    ルールCSVと掛け合わせて分析可能な状態にクレンジングする
     """
-    # ---------------------------------------------------------
-    # ① ルールCSVから係数を抽出
-    # ---------------------------------------------------------
     df_rules = pd.read_csv(rules_file)
     extracted_rules = {}
     madori_list = ['ワンルーム', '1K・1DK', '1LDK', '2K・2DK', '2LDK', '3K・3DK', '3LDK']
@@ -38,22 +134,12 @@ def analyze_real_estate_data_v6(suumo_file, rules_file):
                         pass
         extracted_rules[madori] = rule_dict
 
-    # ---------------------------------------------------------
-    # ② SUUMOデータをクレンジング（どんな列名でも対応）
-    # ---------------------------------------------------------
-    try:
-        df_suumo = pd.read_excel(suumo_file)
-    except Exception:
-        df_suumo = pd.read_csv(suumo_file)
+    df_suumo = raw_df.copy()
 
-    # --- 家賃 ---
+    # --- 💡 変更点: 家賃と共益費の計算（両方の㎡単価を準備しておく） ---
     rent_col = next((c for c in df_suumo.columns if '家賃' in str(c) or '賃料' in str(c)), None)
-    if not rent_col:
-        st.error("❌ エラー: データに「家賃」または「賃料」の列が見つかりません。")
-        st.stop()
     df_suumo['家賃_円'] = df_suumo[rent_col].astype(str).str.extract(r'([\d\.]+)').astype(float) * 10000
     
-    # --- 管理費・共益費 ---
     kyoeki_col = next((c for c in df_suumo.columns if '共益費' in str(c) or '管理費' in str(c)), None)
     if kyoeki_col:
         df_suumo['共益費_円'] = df_suumo[kyoeki_col].astype(str).replace('-', '0').str.extract(r'([\d\.]+)').astype(float).fillna(0)
@@ -63,25 +149,19 @@ def analyze_real_estate_data_v6(suumo_file, rules_file):
     df_suumo.loc[df_suumo['共益費_円'] < 100, '共益費_円'] = df_suumo['共益費_円'] * 10000
     df_suumo['総家賃'] = df_suumo['家賃_円'] + df_suumo['共益費_円']
 
-    # --- 専有面積 ---
     area_col = next((c for c in df_suumo.columns if '面積' in str(c)), None)
-    if area_col:
-        df_suumo['専有面積_m2'] = df_suumo[area_col].astype(str).str.extract(r'([\d\.]+)').astype(float)
-    else:
-        df_suumo['専有面積_m2'] = 25.0
+    df_suumo['専有面積_m2'] = df_suumo[area_col].astype(str).str.extract(r'([\d\.]+)').astype(float) if area_col else 25.0
 
-    df_suumo['㎡単価'] = df_suumo['総家賃'] / df_suumo['専有面積_m2']
+    # 家賃のみの単価、総家賃の単価、両方を計算して持たせておく
+    df_suumo['㎡単価_家賃のみ'] = df_suumo['家賃_円'] / df_suumo['専有面積_m2']
+    df_suumo['㎡単価_総家賃'] = df_suumo['総家賃'] / df_suumo['専有面積_m2']
 
-    # --- 徒歩分数 ---
-    walk_col = next((c for c in df_suumo.columns if str(c) in ['徒歩1', '徒歩', '歩']), None)
+    # --- 徒歩分数の抽出 ---
+    walk_col = next((c for c in df_suumo.columns if str(c) in ['最寄駅1', '駅1', '徒歩1', '徒歩']), None)
     if walk_col:
-        df_suumo['徒歩分数'] = df_suumo[walk_col].astype(str).str.extract(r'(\d+)').astype(float).fillna(10)
+        df_suumo['徒歩分数'] = df_suumo[walk_col].astype(str).str.extract(r'(?:歩|徒歩)(\d+)分').astype(float).fillna(10)
     else:
-        station_info_col = next((c for c in df_suumo.columns if '駅' in str(c)), None)
-        if station_info_col:
-            df_suumo['徒歩分数'] = df_suumo[station_info_col].astype(str).str.extract(r'(?:歩|徒歩)(\d+)分').astype(float).fillna(10)
-        else:
-            df_suumo['徒歩分数'] = 10
+        df_suumo['徒歩分数'] = 10
 
     # --- 築年数 ---
     age_col = next((c for c in df_suumo.columns if '築' in str(c) or '数' in str(c)), None)
@@ -104,13 +184,9 @@ def analyze_real_estate_data_v6(suumo_file, rules_file):
         if any(x in m for x in ['3K', '3DK', '3SK', '3SDK']): return '3K・3DK'
         if '3LDK' in m or '4' in m or '5' in m: return '3LDK'
         return 'その他'
-    
-    if madori_col:
-        df_suumo['間取りグループ'] = df_suumo[madori_col].apply(map_madori)
-    else:
-        df_suumo['間取りグループ'] = '1K・1DK'
+    df_suumo['間取りグループ'] = df_suumo[madori_col].apply(map_madori) if madori_col else '1K・1DK'
 
-    # --- 建物種別 ---
+    # --- 💡 建物種別（ファイルからダイレクトに判定） ---
     type_col = next((c for c in df_suumo.columns if '建物種別' in str(c) or '種別' in str(c)), None)
     if type_col:
         df_suumo['建物種別_判定用'] = df_suumo[type_col].astype(str)
@@ -118,99 +194,108 @@ def analyze_real_estate_data_v6(suumo_file, rules_file):
         text_cols = df_suumo.select_dtypes(include=[object]).fillna('').agg(' '.join, axis=1)
         df_suumo['建物種別_判定用'] = text_cols
 
-    # ---------------------------------------------------------
-    # ③ 駅名の超強力な自動抽出
-    # ---------------------------------------------------------
-    target_station_cols = ['駅1', '最寄駅1', '駅', '最寄駅']
-    station_col = None
-    for c in target_station_cols:
-        if c in df_suumo.columns:
-            station_col = c
-            break
-            
-    if not station_col:
-        for col in df_suumo.columns:
-            col_str = str(col).replace(' ', '').replace('　', '')
-            if '駅' in col_str and '沿線' not in col_str:
-                if '1' in col_str or '１' in col_str:
-                    station_col = col
-                    break
-                if station_col is None:
-                    station_col = col
-
+    # --- 💡 駅名の抽出（沿線/駅 歩X分 から駅名だけを分離） ---
+    station_col = next((c for c in df_suumo.columns if '駅1' in str(c) or '最寄駅1' in str(c) or '駅' in str(c)), None)
+    
     def extract_station(text):
         text = str(text).strip()
-        if text in ('nan', '', 'None', '-'):
+        if text in ('nan', '', 'None', '-'): return '不明'
+        # 「歩」「徒歩」などで区切り、前の部分を取得（例: "京王線/桜上水駅"）
+        text = re.split(r'歩|徒歩|バス|車|\s|　', text)[0].strip()
+        # スラッシュがあれば後ろを取得（例: "桜上水駅"）
+        if '/' in text:
+            text = text.split('/')[-1]
+        if text.endswith('駅'):
+            text = text[:-1]
+        if text.endswith('線'):
             return '不明'
-            
-        text = re.split(r'歩|徒歩|バス|車', text)[0].strip()
-        parts = re.split(r'[/ 　]+', text)
-        
-        station_name = ""
-        for part in reversed(parts):
-            if '駅' in part:
-                station_name = part.replace('駅', '')
-                break
-        
-        if not station_name:
-            if len(parts) > 1:
-                station_name = parts[-1] 
-            else:
-                station_name = parts[0]
-                
-        station_name = station_name.strip()
-        if station_name.endswith('駅'):
-            station_name = station_name[:-1]
-        if station_name.endswith('線'):
-            return '不明'
-            
-        return station_name if station_name else '不明'
+        return text if text else '不明'
 
-    if station_col:
-        df_suumo['駅名'] = df_suumo[station_col].apply(extract_station)
-    else:
-        df_suumo['駅名'] = '不明'
+    df_suumo['駅名'] = df_suumo[station_col].apply(extract_station) if station_col else '不明'
 
     return extracted_rules, df_suumo
 
 # =========================================================
-# 3. UIロジック
+# 4. UIロジック
 # =========================================================
-tab1, tab2 = st.tabs(["📂 ①データのアップロード＆解析", "🤖 ②詳細査定シミュレーター"])
+tab1, tab2 = st.tabs(["📂 ①データの取得＆解析 (スクレイピング対応)", "🤖 ②詳細査定シミュレーター"])
 
 # ---------------------------------------------------------
-# TAB 1: アップロード画面
+# TAB 1: アップロード / スクレイピング画面
 # ---------------------------------------------------------
 with tab1:
-    st.write("当該エリアのSUUMO物件一覧エクセルと、ルールフォーマットCSVをアップロードしてください。")
+    st.write("「SUUMOから自動取得」または「お手元のExcelファイルアップロード」のどちらかを選択してください。")
     
-    colA, colB = st.columns(2)
-    with colA:
-        uploaded_suumo = st.file_uploader("SUUMO物件データ (Excel/CSV)", type=["xlsx", "csv"])
-    with colB:
-        uploaded_rules = st.file_uploader("ルールフォーマット (CSV)", type=["csv"])
+    data_source = st.radio("データソースの選択", ["🌐 SUUMOのURLから自動取得 (スクレイピング)", "📁 エクセル/CSVファイルをアップロード"])
+    
+    df_raw = None
+    
+    if data_source == "🌐 SUUMOのURLから自動取得 (スクレイピング)":
+        target_url = st.text_input("SUUMOの検索結果URLを貼り付けてください", placeholder="https://suumo.jp/jj/chintai/ichiran/...")
+        max_pages = st.number_input("取得する最大ページ数", min_value=1, max_value=20, value=3)
+        
+        if st.button("🚀 データを取得する"):
+            if target_url:
+                with st.spinner("SUUMOから物件データを自動収集しています。しばらくお待ちください..."):
+                    scraped_df = scrape_suumo_list(target_url, max_pages)
+                    if not scraped_df.empty:
+                        st.session_state['raw_df'] = scraped_df
+                        st.success(f"✅ {len(scraped_df)}件の物件データを取得しました！")
+                    else:
+                        st.error("データの取得に失敗しました。URLが正しいか確認してください。")
+            else:
+                st.warning("URLを入力してください。")
+                
+        # 取得済みデータの表示とダウンロード
+        if 'raw_df' in st.session_state:
+            st.write("取得したデータプレビュー:")
+            st.dataframe(st.session_state['raw_df'].head())
+            df_raw = st.session_state['raw_df']
+            
+            # Excelとしてダウンロード可能に
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                df_raw.to_excel(writer, index=False)
+            st.download_button(label="📥 取得したデータをExcelで保存", data=buffer.getvalue(), file_name="suumo_scraped_data.xlsx", mime="application/vnd.ms-excel")
 
-    if uploaded_suumo is not None and uploaded_rules is not None:
-        with st.spinner("データを解析し、駅ごとの相場とルールを構築しています..."):
-            extracted_rules, df_suumo = analyze_real_estate_data_v6(uploaded_suumo, uploaded_rules)
-            
-            st.session_state['rules'] = extracted_rules
-            st.session_state['df_suumo'] = df_suumo
-            
-            st.success("✅ 解析完了！駅名を自動抽出しました。「②詳細査定シミュレーター」タブへお進みください。")
+    else:
+        uploaded_suumo = st.file_uploader("SUUMO物件データ (Excel/CSV)", type=["xlsx", "csv"])
+        if uploaded_suumo:
+            try:
+                df_raw = pd.read_excel(uploaded_suumo)
+            except:
+                df_raw = pd.read_csv(uploaded_suumo)
+            st.success("✅ ファイルを読み込みました！")
+
+    st.markdown("---")
+    st.write("▼ 共通: ルールCSVをアップロードして解析を実行してください")
+    uploaded_rules = st.file_uploader("ルールフォーマット (CSV) ※必須", type=["csv"])
+
+    if df_raw is not None and uploaded_rules is not None:
+        if st.button("🧠 解析してシミュレーターを起動"):
+            with st.spinner("データを解析し、駅ごとの相場とルールを構築しています..."):
+                extracted_rules, df_suumo = analyze_real_estate_data_v7(df_raw, uploaded_rules)
+                
+                st.session_state['rules'] = extracted_rules
+                st.session_state['df_suumo'] = df_suumo
+                
+                st.success("✅ 解析完了！「②詳細査定シミュレーター」タブへお進みください。")
 
 # ---------------------------------------------------------
 # TAB 2: シミュレーター画面
 # ---------------------------------------------------------
 with tab2:
-    if 'rules' not in st.session_state:
-        st.warning("⚠️ 先に「①データのアップロード＆解析」タブでファイルを取り込んでください。")
+    if 'rules' not in st.session_state or 'df_suumo' not in st.session_state:
+        st.warning("⚠️ 先に「①データの取得＆解析」タブでデータを取り込んでください。")
     else:
         st.subheader("🤖 詳細査定シミュレーター")
-        st.write("アップロードしたデータに基づき、対象駅の相場とルール係数を掛け合わせて適正な賃料を算出します。")
         
         rules = st.session_state['rules']
         df_suumo = st.session_state['df_suumo']
+
+        # 💡 追加: 計算基準（家賃のみ vs 家賃＋共益費）の切り替え
+        calc_mode = st.radio("💰 単価計算の基準（ベース相場に共益費を含めるか）", ["家賃＋共益費（総家賃）で計算", "家賃のみで計算"], horizontal=True)
+        tanka_col = '㎡単価_総家賃' if calc_mode == "家賃＋共益費（総家賃）で計算" else '㎡単価_家賃のみ'
 
         valid_layouts = list(rules.keys())
         default_layout_idx = valid_layouts.index('1K・1DK') if '1K・1DK' in valid_layouts else 0
@@ -248,7 +333,6 @@ with tab2:
             i_box = st.checkbox("宅配ボックス", value=False)
             i_premium = st.number_input("その他・手動プレミアム (円)", value=0, step=1000)
 
-        # ⚠️ 二重計算防止のため、マンション/アパートはここ（加減算）から除外しています
         selected_features = {
             '2階以上': i_2f, '角部屋': i_corner, '南向き': i_south,
             'バス・トイレ別': i_bt, '洗面所独立': i_sh, '温水洗浄便座': i_wc,
@@ -258,7 +342,7 @@ with tab2:
         }
 
         # ==========================================
-        # 💡 ベース相場の取得（建物種別でベースを変動させる）
+        # 💡 ベース相場の取得（選択された計算基準 `tanka_col` を使用）
         # ==========================================
         mask_base = (df_suumo['間取りグループ'] == target_layout)
         
@@ -270,22 +354,21 @@ with tab2:
         elif i_btype == 'アパート':
             mask_base &= df_suumo['建物種別_判定用'].str.contains('アパート', na=False)
 
-        tanka_series_base = df_suumo[mask_base]['㎡単価'].dropna()
+        tanka_series_base = df_suumo[mask_base][tanka_col].dropna()
         
         if len(tanka_series_base) > 0:
             tanka_base = tanka_series_base.median()
         else:
-            # 万が一、指定駅に「アパート」が1件もない場合は、エリア全体のアパート相場で代用
             mask_fallback = (df_suumo['間取りグループ'] == target_layout)
             if i_btype in ['マンション', 'アパート']:
                 mask_fallback &= df_suumo['建物種別_判定用'].str.contains(i_btype, na=False)
             
-            tanka_series_fb = df_suumo[mask_fallback]['㎡単価'].dropna()
+            tanka_series_fb = df_suumo[mask_fallback][tanka_col].dropna()
             if len(tanka_series_fb) > 0:
                 tanka_base = tanka_series_fb.median()
                 st.warning(f"⚠️ 指定された「{selected_station}駅」には{i_btype}のデータがないため、ベース家賃はエリア全体の{i_btype}相場を代用しています。")
             else:
-                tanka_base = df_suumo[df_suumo['間取りグループ'] == target_layout]['㎡単価'].dropna().median()
+                tanka_base = df_suumo[df_suumo['間取りグループ'] == target_layout][tanka_col].dropna().median()
                 if pd.isna(tanka_base): tanka_base = 4000
                 st.warning(f"⚠️ {i_btype}のデータが見つからないため、全体の相場を使用しています。")
 
