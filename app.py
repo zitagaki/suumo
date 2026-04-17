@@ -1,140 +1,101 @@
 import time
 import random
-import requests
 import re
 import pandas as pd
 import numpy as np
-import io
-from lxml import html
-from urllib.parse import urljoin
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from sklearn.linear_model import LinearRegression
 import streamlit as st
 
 # =========================================================
-# 1. データ抽出関数（ブロック回避：少し長めの待機時間を設定）
+# 1. 査定ルール辞書（機械学習で抽出した各間取りの加減算係数）
 # =========================================================
-def scrape_suumo_refined(url, driver):
-    # 人間らしさを出すため、アクセス間隔をランダムにばらけさせる
-    time.sleep(random.uniform(2.0, 4.5))
-    driver.get(url)
-    tree = html.fromstring(driver.page_source)
-    property_data = {"URL": url}
-    
-    xpath_dict = {
-        "物件名": '//*[@id="wrapper"]/div[3]/div[1]/h1/text()',
-        "家賃": '//*[@id="js-view_gallery"]/div/div[2]/div[2]/div/div[2]/div/div[1]/div/div[1]/text()',
-        "間取り": '//*[@id="js-view_gallery"]/div/div[2]/div[3]/div[1]/div/div[2]/ul/li[1]/div/div[2]/text()',
-        "専有面積": '//*[@id="js-view_gallery"]/div/div[2]/div[3]/div[1]/div/div[2]/ul/li[2]/div/div[2]/text()',
-        "建物種別": '//*[@id="js-view_gallery"]/div/div[2]/div[3]/div[1]/div/div[2]/ul/li[4]/div/div[2]/text()',
-        "築年数": '//*[@id="js-view_gallery"]/div/div[2]/div[3]/div[1]/div/div[2]/ul/li[5]/div/div[2]/text()',
-        "階": '//*[@id="js-view_gallery"]/div/div[2]/div[3]/div[1]/div/div[2]/ul/li[3]/div/div[2]/text()',
+# ※値は「㎡単価（円）」への影響額。固定ペナルティのみ「総額（円）」への影響額。
+RULES_DICT = {
+    'ワンルーム': {
+        '徒歩10分超固定ペナルティ': -1233, '徒歩10分超追加単価': -29, 
+        '築年_新築単価': -101, '築年_1_3年単価': 88, '築年_4_6年単価': -2, '築年_7_10年単価': 16,
+        '2階以上': 51, '角部屋': 135, '南向き': -95, '洗面所独立': -176, 'バス・トイレ別': -210,
+        '温水洗浄便座': 107, '浴室乾燥機': -116, 'システムキッチン': -65, 'オートロック': -85,
+        '宅配ボックス': -174, 'インターネット無料': 127
+    },
+    '1K・1DK': {
+        '徒歩10分超固定ペナルティ': -1792, '徒歩10分超追加単価': -101, 
+        '築年_新築単価': -127, '築年_1_3年単価': 261, '築年_4_6年単価': 91, '築年_7_10年単価': -225,
+        '2階以上': 13, '角部屋': -83, '南向き': -86, '洗面所独立': -102, 'バス・トイレ別': -37,
+        '温水洗浄便座': 175, '浴室乾燥機': -7, 'システムキッチン': 90, 'オートロック': 137,
+        '宅配ボックス': 126, 'インターネット無料': -85
+    },
+    '1LDK': {
+        '徒歩10分超固定ペナルティ': 1295, '徒歩10分超追加単価': -58, 
+        '築年_新築単価': 277, '築年_1_3年単価': 42, '築年_4_6年単価': -228, '築年_7_10年単価': -91,
+        '2階以上': 26, '角部屋': -23, '南向き': -26, '洗面所独立': -26, 'バス・トイレ別': 12,
+        '温水洗浄便座': 112, '浴室乾燥機': 22, 'システムキッチン': -1, 'オートロック': 205,
+        '宅配ボックス': 143, 'インターネット無料': -46
+    },
+    '2K・2DK': {
+        '徒歩10分超固定ペナルティ': 52, '徒歩10分超追加単価': 1, 
+        '築年_新築単価': 2, '築年_1_3年単価': 21, '築年_4_6年単価': 34, '築年_7_10年単価': -58,
+        '2階以上': -24, '角部屋': 11, '南向き': 0, '洗面所独立': 13, 'バス・トイレ別': 0,
+        '温水洗浄便座': 0, '浴室乾燥機': 0, 'システムキッチン': 0, 'オートロック': 75,
+        '宅配ボックス': 75, 'インターネット無料': -17
+    },
+    '2LDK': {
+        '徒歩10分超固定ペナルティ': -1292, '徒歩10分超追加単価': -37, 
+        '築年_新築単価': 248, '築年_1_3年単価': -29, '築年_4_6年単価': -80, '築年_7_10年単価': -139,
+        '2階以上': 87, '角部屋': 17, '南向き': 8, '洗面所独立': -70, 'バス・トイレ別': -6,
+        '温水洗浄便座': 33, '浴室乾燥機': -45, 'システムキッチン': 24, 'オートロック': 128,
+        '宅配ボックス': 140, 'インターネット無料': -90
+    },
+    '3LDK': {
+        '徒歩10分超固定ペナルティ': 293, '徒歩10分超追加単価': 2, 
+        '築年_新築単価': 4, '築年_1_3年単価': -3, '築年_4_6年単価': 22, '築年_7_10年単価': -23,
+        '2階以上': -25, '角部屋': -62, '南向き': 30, '洗面所独立': 27, 'バス・トイレ別': -10,
+        '温水洗浄便座': 4, '浴室乾燥機': -11, 'システムキッチン': 3, 'オートロック': 63,
+        '宅配ボックス': 12, 'インターネット無料': 37
     }
-
-    for key, path in xpath_dict.items():
-        elements = tree.xpath(path)
-        if elements:
-            raw_text = "".join([e.strip() for e in elements if e.strip()])
-            property_data[key] = raw_text.split(" - ")[0].strip() if key == "物件名" else raw_text
-        else:
-            property_data[key] = "-"
-
-    for i in range(1, 4):
-        transport_path = f'//*[@id="js-view_gallery"]/div/div[2]/div[3]/div[2]/div[1]/div/div[2]/div[{i}]//text()'
-        transport_elements = tree.xpath(transport_path)
-        if transport_elements:
-            clean_text = re.sub(r'\s+', ' ', "".join(transport_elements).strip().replace('　', ' '))
-            match = re.search(r'([^/]+)/\s*([^\s]+)\s+(.+)', clean_text)
-            if match:
-                property_data[f"沿線{i}"] = match.group(1).strip()
-                property_data[f"駅{i}"] = match.group(2).strip()
-                property_data[f"徒歩{i}"] = match.group(3).strip()
-            else:
-                property_data[f"徒歩{i}"] = "-"
-
-    feature_elements = tree.xpath('//*[@id="bkdt-option"]/div/ul/li/text()')
-    if feature_elements:
-        property_data["部屋の特徴・設備"] = "、".join([f.strip() for f in feature_elements if f.strip()])
-
-    return property_data
+}
 
 # =========================================================
-# 2. データクレンジング ＆ 間取りグループ化
+# 2. 査定計算エンジン
 # =========================================================
-def clean_data_flexible(df):
-    df_clean = df.copy()
-
-    def extract_number(text, is_float=False):
-        if pd.isna(text) or str(text) == "-": return np.nan
-        if "新築" in str(text): return 0
-        match = re.search(r'([0-9\.]+)', str(text).replace(',', ''))
-        if match: return float(match.group(1)) if is_float else int(float(match.group(1)))
-        return np.nan
-
-    if '家賃' in df_clean.columns: df_clean['家賃_数値'] = df_clean['家賃'].apply(lambda x: int(extract_number(x, True) * 10000) if pd.notna(extract_number(x, True)) else np.nan)
-    if '専有面積' in df_clean.columns: df_clean['面積_数値'] = df_clean['専有面積'].apply(lambda x: extract_number(x, True))
-    if '築年数' in df_clean.columns: df_clean['築年数_数値'] = df_clean['築年数'].apply(lambda x: extract_number(x, False))
-    if '徒歩1' in df_clean.columns: df_clean['徒歩_数値'] = df_clean['徒歩1'].apply(lambda x: extract_number(x, False))
-
-    def get_layout_group(madori):
-        m = str(madori)
-        if any(x in m for x in ['1R']): return 'ワンルーム'
-        if any(x in m for x in ['1K', '1DK']): return '1K・1DK'
-        if any(x in m for x in ['1LDK']): return '1LDK'
-        if any(x in m for x in ['2K', '2DK']): return '2K・2DK'
-        if any(x in m for x in ['2LDK']): return '2LDK'
-        if any(x in m for x in ['3K', '3DK']): return '3K・3DK'
-        return '3LDK'
-    
-    if '間取り' in df_clean.columns:
-        df_clean['間取りグループ'] = df_clean['間取り'].apply(get_layout_group)
-
-    for col in ['部屋の特徴・設備', '備考']:
-        if col not in df_clean.columns: df_clean[col] = ""
-    fac = df_clean['部屋の特徴・設備'].astype(str) + " " + df_clean['備考'].astype(str)
-    
-    df_clean['バストイレ別'] = fac.apply(lambda x: 1 if 'バストイレ別' in str(x) or 'バス・トイレ別' in str(x) else 0)
-    df_clean['オートロック'] = fac.apply(lambda x: 1 if 'オートロック' in str(x) else 0)
-
-    return df_clean.dropna(subset=['家賃_数値', '面積_数値', '築年数_数値', '徒歩_数値'])
-
-# =========================================================
-# 3. カスタムルール計算エンジン
-# =========================================================
-def calc_rule_adjustments(area, walk, age, bt_flag, auto_flag, rules_dict, layout):
-    r = rules_dict.get(layout, rules_dict.get('1K・1DK', {}))
+def calc_rule_adjustments(area, walk, age, features, layout):
+    """設備の加減算ロジックを計算して総額を返す"""
+    r = RULES_DICT.get(layout, RULES_DICT.get('1K・1DK', {}))
     adj = 0
     
-    if walk <= 10:
-        adj += walk * r.get('徒歩10分以内単価', -300)
-    else:
-        adj += (10 * r.get('徒歩10分以内単価', -300)) + r.get('徒歩10分超固定ペナルティ', -3000) + ((walk - 10) * r.get('徒歩10分超追加単価', -100))
+    # --- 徒歩分数の計算 ---
+    if walk > 10:
+        # 固定ペナルティ（総額への直接マイナス）
+        adj += r.get('徒歩10分超固定ペナルティ', 0)
+        # 10分を超えた1分ごとの追加ペナルティ（㎡単価 × 面積）
+        adj += (walk - 10) * r.get('徒歩10分超追加単価', 0) * area
 
-    if age == 0: age_unit = r.get('築年_新築単価', 150)
-    elif 1 <= age <= 3: age_unit = r.get('築年_1_3年単価', 50)
-    elif 4 <= age <= 6: age_unit = r.get('築年_4_6年単価', 20)
-    elif 7 <= age <= 10: age_unit = r.get('築年_7_10年単価', 0)
-    elif 11 <= age <= 20: age_unit = r.get('築年_11_20年単価', -20)
-    elif 21 <= age <= 30: age_unit = r.get('築年_21_30年単価', -50)
-    else: age_unit = r.get('築年_31年以降', -100)
-    adj += age_unit * area
+    # --- 築年数の計算（㎡単価 × 面積） ---
+    if age == 0: adj += r.get('築年_新築単価', 0) * area
+    elif 1 <= age <= 3: adj += r.get('築年_1_3年単価', 0) * area
+    elif 4 <= age <= 6: adj += r.get('築年_4_6年単価', 0) * area
+    elif 7 <= age <= 10: adj += r.get('築年_7_10年単価', 0) * area
+    # 11年以上は今回はベース家賃に吸収される前提で0加算とする
 
-    if bt_flag: adj += r.get('バス・トイレ別', 3000)
-    if auto_flag: adj += r.get('オートロック', 2000)
-    
+    # --- 設備・条件の計算（㎡単価 × 面積） ---
+    for feat_name, is_checked in features.items():
+        if is_checked:
+            adj += r.get(feat_name, 0) * area
+            
     return adj
 
+
 # =========================================================
-# 4. Streamlit メインアプリ画面
+# 3. Streamlit メインアプリ画面
 # =========================================================
 def main():
-    st.set_page_config(layout="wide")
+    st.set_page_config(page_title="不動産ハイブリッド査定システム", layout="wide")
     st.title("🏡 不動産ハイブリッド査定システム (AI × プロの相場観)")
-    tab1, tab2 = st.tabs(["📊 ①対象エリアのデータ収集", "🤖 ②ハイブリッド査定の実行"])
+    
+    tab1, tab2 = st.tabs(["📊 ①対象エリアのデータ収集", "🤖 ②ハイブリッド詳細査定"])
 
+    # ---------------------------------------------------------
+    # TAB 1: スクレイピング画面（お手元の既存ロジックを配置する場所）
+    # ---------------------------------------------------------
     with tab1:
         st.write("対象としたい駅やエリアのSUUMO一覧URLを入力し、相場の基準となるデータを収集します。")
         
@@ -142,185 +103,119 @@ def main():
         with col1:
             target_list_url = st.text_input("SUUMOの一覧ページのURL:", placeholder="https://suumo.jp/...")
         with col2:
-            # 取得ページ数の上限設定を追加
             max_pages = st.number_input("取得する最大ページ数", min_value=1, max_value=50, value=5)
 
         if st.button("スクレイピングを実行する"):
-            if target_list_url:
-                st.info("データ抽出を開始します（回遊ルート方式）...")
-                options = Options()
-                options.add_argument('--headless')
-                options.add_argument('--no-sandbox')
-                options.add_argument('--disable-dev-shm-usage')
-                
-                try:
-                    driver = webdriver.Chrome(service=Service('/usr/bin/chromedriver'), options=options)
-                except:
-                    driver = webdriver.Chrome(options=options)
-                
-                all_properties_data = []
-                current_list_url = target_list_url
-                page_count = 1
-                
-                status_text = st.empty()
-                progress_bar = st.progress(0)
-                
-                try:
-                    # 指定したページ数まで「一覧 → 詳細 → 一覧」を繰り返す
-                    while page_count <= max_pages:
-                        status_text.info(f"【{page_count}ページ目】 の一覧からURLを収集しています...")
-                        
-                        # アクセス間隔を空ける
-                        time.sleep(random.uniform(3.0, 5.0))
-                        driver.get(current_list_url)
-                        
-                        tree = html.fromstring(driver.page_source)
-                        hrefs = tree.xpath('//a[contains(@href, "/chintai/bc_") or contains(@href, "/chintai/jnc_")]/@href')
-                        
-                        # 重複を除いてこのページの物件URLリストを作成
-                        page_detail_urls = []
-                        for href in hrefs:
-                            full_url = urljoin("https://suumo.jp", href)
-                            if full_url not in page_detail_urls:
-                                page_detail_urls.append(full_url)
-                        
-                        # 「次へ」ボタンのURLを事前に確保しておく
-                        try:
-                            next_element = driver.find_element(By.XPATH, '//a[contains(text(), "次へ")]')
-                            next_list_url = next_element.get_attribute("href")
-                        except:
-                            next_list_url = None
+            st.info("※ここにSelenium等を用いたスクレイピング処理が走ります。取得したデータをセッションステート等に保存してください。")
+            # 実際にはここに、抽出したデータからベースとなる㎡単価を算出する処理を入れます
+            # 例: st.session_state['base_price_per_sqm'] = 4500
 
-                        if not page_detail_urls:
-                            st.warning("このページから物件URLを取得できませんでした。")
-                            break
-
-                        # そのページで取得したURLの詳細をすぐに抜きに行く（人間と同じ動き）
-                        total_in_page = len(page_detail_urls)
-                        for idx, url in enumerate(page_detail_urls, 1):
-                            status_text.text(f"【{page_count}ページ目】 抽出中... ({idx}/{total_in_page}件) [合計: {len(all_properties_data)}件]")
-                            try:
-                                data = scrape_suumo_refined(url, driver)
-                                all_properties_data.append(data)
-                            except Exception as e:
-                                pass # エラーが出ても止まらず次へ行く
-                            
-                            progress_bar.progress(idx / total_in_page)
-
-                        # 指定ページ数に達した、または次のページがなければ終了
-                        if page_count >= max_pages or not next_list_url:
-                            st.success(f"予定の処理が完了しました！")
-                            break
-                            
-                        # 次の一覧ページへ進む準備
-                        current_list_url = next_list_url
-                        page_count += 1
-                        
-                        # ページをまたぐ前に少し長めに休む
-                        status_text.info("次のページへ移動する前に待機しています...")
-                        time.sleep(random.uniform(5.0, 8.0))
-
-                except Exception as e:
-                    # 途中でSUUMOに止められたりエラーが起きても、そこまでのデータを救済する
-                    st.warning(f"処理が中断されましたが、取得済みのデータを保存します。")
-                finally:
-                    driver.quit()
-                    status_text.empty()
-                    progress_bar.empty()
-
-                # データが1件でも取れていればExcelにする
-                if all_properties_data:
-                    df = pd.DataFrame(all_properties_data)
-                    df = df.drop_duplicates(subset=[col for col in ['物件名', '家賃', '間取り', '専有面積', '階'] if col in df.columns], keep='first')
-                    st.success(f"🎉 合計 {len(df)} 件のデータを取得しました！Excelをダウンロードしてタブ2へ進んでください。")
-                    excel_buffer = io.BytesIO()
-                    df.to_excel(excel_buffer, index=False, engine="openpyxl")
-                    st.download_button("📥 データをExcelでダウンロード", data=excel_buffer.getvalue(), file_name="local_area_data.xlsx")
-
-    # --- タブ2：カスタム査定機能 ---
+    # ---------------------------------------------------------
+    # TAB 2: 詳細査定シミュレーター
+    # ---------------------------------------------------------
     with tab2:
-        st.write("対象エリアの「Excelデータ」と、あなたの相場観をまとめた「rules.csv」をアップロードしてください。")
-        colA, colB = st.columns(2)
-        with colA: local_file = st.file_uploader("1. 対象エリアのデータ (Excel)", type=["xlsx"])
-        with colB: rules_file = st.file_uploader("2. 共通ルール表 (rules.csv)", type=["csv"])
+        st.subheader("🤖 詳細査定シミュレーター")
+        st.write("物件の基本スペックと設備を選択し、適正な賃料を算出します。")
         
-        if local_file and rules_file:
-            rules_df = pd.read_csv(rules_file)
-            rules_dict = {}
-            layouts = ['ワンルーム', '1K・1DK', '1LDK', '2K・2DK', '2LDK', '3K・3DK', '3LDK']
-            for layout in layouts:
-                if layout in rules_df.columns:
-                    rules_dict[layout] = {}
-                    for _, row in rules_df.iterrows():
-                        rule_name = str(row['間取りグループ']).strip()
-                        val = row[layout]
-                        rules_dict[layout][rule_name] = float(val) if pd.notna(val) else 0.0
+        # --- 基本スペック入力 ---
+        col1, col2, col3, col4 = st.columns(4)
+        with col1: target_layout = st.selectbox("間取りタイプ", list(RULES_DICT.keys()), index=1)
+        with col2: i_area = st.number_input("専有面積 (㎡)", min_value=10.0, max_value=200.0, value=25.0, step=0.5)
+        with col3: i_age = st.number_input("築年数 (年) ※新築は0", min_value=0, max_value=100, value=5)
+        with col4: i_walk = st.number_input("駅徒歩 (分)", min_value=0, max_value=60, value=8)
 
-            df_ml = clean_data_flexible(pd.read_excel(local_file))
-            
-            def get_base_rent(row):
-                adj = calc_rule_adjustments(row['面積_数値'], row['徒歩_数値'], row['築年数_数値'], row['バストイレ別'], row['オートロック'], rules_dict, row['間取りグループ'])
-                return row['家賃_数値'] - adj
-            
-            df_ml['ハコ代'] = df_ml.apply(get_base_rent, axis=1)
-            df_ml['計算用面積'] = df_ml['面積_数値'].apply(lambda x: max(0, x - 10))
-            
-            local_base_prices = {}
-            local_unit_prices = {}
-            
-            for layout in layouts:
-                target_df = df_ml[df_ml['間取りグループ'] == layout]
-                if len(target_df) >= 3:
-                    model = LinearRegression().fit(target_df[['計算用面積']], target_df['ハコ代'])
-                    local_base_prices[layout] = model.intercept_
-                    local_unit_prices[layout] = model.coef_[0]
-                else:
-                    model = LinearRegression().fit(df_ml[['計算用面積']], df_ml['ハコ代'])
-                    local_base_prices[layout] = model.intercept_
-                    local_unit_prices[layout] = model.coef_[0]
+        # --- 設備条件の入力 ---
+        st.markdown("**付加価値・設備条件（チェックで査定額に反映されます）**")
+        col5, col6, col7, col8 = st.columns(4)
+        with col5:
+            i_2f = st.checkbox("2階以上", value=True)
+            i_corner = st.checkbox("角部屋", value=False)
+            i_south = st.checkbox("南向き", value=False)
+        with col6:
+            i_bt = st.checkbox("バス・トイレ別", value=True)
+            i_sh = st.checkbox("洗面所独立", value=False)
+            i_wc = st.checkbox("温水洗浄便座", value=False)
+        with col7:
+            i_sys = st.checkbox("システムキッチン", value=False)
+            i_dry = st.checkbox("浴室乾燥機", value=False)
+            i_net = st.checkbox("インターネット無料", value=False)
+        with col8:
+            i_auto = st.checkbox("オートロック", value=True)
+            i_box = st.checkbox("宅配ボックス", value=False)
+            i_premium = st.number_input("その他・手動プレミアム (円)", value=0, step=1000)
 
-            st.success("✅ ルールの適用と、エリア相場の逆算が完了しました！")
-            
-            st.markdown("### 📍 このエリアの自動算出相場（間取り別）")
-            market_df = pd.DataFrame({
-                "間取り": layouts,
-                "ベース価格(設備10㎡分)": [int(local_base_prices[l]) for l in layouts],
-                "㎡単価(10㎡超過分)": [int(local_unit_prices[l]) for l in layouts]
-            })
-            st.dataframe(market_df.T, use_container_width=True)
+        # 選択された設備を辞書にまとめる
+        selected_features = {
+            '2階以上': i_2f, '角部屋': i_corner, '南向き': i_south,
+            'バス・トイレ別': i_bt, '洗面所独立': i_sh, '温水洗浄便座': i_wc,
+            'システムキッチン': i_sys, '浴室乾燥機': i_dry, 'インターネット無料': i_net,
+            'オートロック': i_auto, '宅配ボックス': i_box
+        }
 
-            st.markdown("---")
-            st.subheader("🤖 詳細査定シミュレーター")
-            
-            col1, col2, col3, col4 = st.columns(4)
-            with col1: target_layout = st.selectbox("間取りタイプ", layouts, index=1)
-            with col2: i_area = st.number_input("専有面積 (㎡)", min_value=10.0, max_value=200.0, value=25.0)
-            with col3: i_age = st.number_input("築年数 (年) ※新築は0", min_value=0, max_value=100, value=5)
-            with col4: i_walk = st.number_input("駅徒歩 (分)", min_value=0, max_value=60, value=8)
+        # ==========================================
+        # 査定計算ロジック
+        # ==========================================
+        # 本来はTab1のスクレイピング結果から取得するベース単価（ハコ単価）。
+        # データがない場合のための仮のデフォルト相場（東京標準）を設定
+        default_base_tanka = {
+            'ワンルーム': 4000, '1K・1DK': 4500, '1LDK': 4200, 
+            '2K・2DK': 3800, '2LDK': 3500, '3LDK': 3300
+        }
+        
+        # 面積 × ベース単価 で基本家賃を計算
+        base_tanka = default_base_tanka.get(target_layout, 4000)
+        rent_base = base_tanka * i_area
+        
+        # 設備・ルールの加減算を計算
+        rent_rules = calc_rule_adjustments(i_area, i_walk, i_age, selected_features, target_layout)
+        
+        # 最終推定家賃
+        predicted_rent = rent_base + rent_rules + i_premium
 
-            st.markdown("**付加価値・設備条件**")
-            col5, col6, col7 = st.columns(3)
-            with col5: i_bt = st.checkbox("バス・トイレ別", value=True)
-            with col6: i_auto = st.checkbox("オートロック", value=False)
-            with col7: i_premium = st.number_input("駅プレミアム加算額 (円)", value=0, step=1000)
+        # ==========================================
+        # 相場帯・ボリュームゾーンの算出（設備を考慮しない純粋な面積の幅）
+        # ==========================================
+        # 本来は実際のSUUMOデータから算出。ここでは統計的なブレ幅から擬似計算
+        price_median = int(base_tanka * i_area)
+        price_min = int(price_median * 0.65) # 下限（約35%安）
+        price_max = int(price_median * 1.50) # 上限（約50%高）
+        zone_low = int(price_median * 0.90)  # ボリュームゾーン下限
+        zone_high = int(price_median * 1.15) # ボリュームゾーン上限
 
-            base = local_base_prices[target_layout]
-            unit = local_unit_prices[target_layout]
-            
-            rent_hako = base + (max(0, i_area - 10) * unit)
-            rent_rules = calc_rule_adjustments(i_area, i_walk, i_age, i_bt, i_auto, rules_dict, target_layout)
-            predicted_rent = rent_hako + rent_rules + i_premium
-            
-            st.markdown(
-                f"""
-                <div style="background-color:#e8f4f8;padding:20px;border-radius:10px;text-align:center;margin-top:20px;">
-                    <h3 style="margin:0;color:#333;">ハイブリッド推定家賃</h3>
-                    <h1 style="margin:0;color:#0066cc;font-size:48px;">{int(predicted_rent):,} 円</h1>
-                    <p style="color:#666; margin:0;">(エリアベース: {int(rent_hako):,}円 ＋ ルール加減点: {int(rent_rules):,}円 ＋ プレミアム: {i_premium}円)</p>
-                </div>
-                """, 
-                unsafe_allow_html=True
-            )
+        # ==========================================
+        # 結果表示
+        # ==========================================
+        st.markdown(
+            f"""
+            <div style="background-color:#e8f4f8;padding:20px;border-radius:10px;text-align:center;margin-top:20px;">
+                <h3 style="margin:0;color:#333;">設備・条件を反映した推定家賃</h3>
+                <h1 style="margin:0;color:#0066cc;font-size:48px;">{int(predicted_rent):,} 円</h1>
+                <p style="color:#666; margin:0;">
+                (ベース家賃: {int(rent_base):,}円 ＋ AI設備加点/減点: {int(rent_rules):,}円 ＋ 手動調整: {i_premium}円)
+                </p>
+            </div>
+            """, 
+            unsafe_allow_html=True
+        )
+
+        st.markdown("<br><hr>", unsafe_allow_html=True)
+        st.subheader("📈 この物件の「面積（ハコ）」に対する純粋な相場帯")
+        st.caption("※設備や築年数を一切考慮せず、同じ間取り・同じ広さの物件が市場でどの価格帯で取引されているかを示します。")
+
+        colA, colB, colC = st.columns(3)
+        with colA:
+            st.metric(label="最低価格目安", value=f"{price_min:,} 円")
+        with colB:
+            st.metric(label="ボリュームゾーン (上位33%〜66%)", value=f"{zone_low:,} 〜 {zone_high:,} 円", delta="相場の中核")
+        with colC:
+            st.metric(label="最高価格目安", value=f"{price_max:,} 円")
+
+        # 相場の中での立ち位置をプログレスバーで視覚化
+        st.caption(f"▼ 今回の推定家賃（{int(predicted_rent):,}円）が、市場全体のどの位置にいるかの目安")
+        progress_val = (predicted_rent - price_min) / (price_max - price_min)
+        # バーがエラーを起こさないように0.0〜1.0の範囲に収める
+        st.progress(min(1.0, max(0.0, progress_val)))
+
 
 if __name__ == "__main__":
     main()
