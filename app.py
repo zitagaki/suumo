@@ -19,8 +19,8 @@ st.title("🏡 不動産ハイブリッド査定システム (AI × プロの相
 # =========================================================
 def scrape_suumo_list(base_url, max_pages=3):
     """
-    SUUMOの検索結果URLから、指定したページ数分の物件情報をスクレイピングする
-    ロボット検知回避 ＋ URLフォーマットの自動補正機能を搭載
+    SUUMOの検索結果URLから物件情報をスクレイピングする
+    ※ユーザー指定の40項目フォーマットに完全準拠して出力します
     """
     all_data = []
     
@@ -34,13 +34,11 @@ def scrape_suumo_list(base_url, max_pages=3):
         'Upgrade-Insecure-Requests': '1'
     }
     
-    # 💡超強力補正：URLが「部屋ごとに表示(FR301FC005等)」だった場合、強制的に「物件ごとに表示(FR301FC001)」に変換する
-    # これにより、HTML構造の違いによるエラーを根絶します。
+    # URL自動補正（部屋ごとに表示→物件ごとに表示へ変換しエラーを防ぐ）
     base_url = base_url.replace('FR301FC005', 'FR301FC001')
     base_url = base_url.replace('FR301FC006', 'FR301FC001')
     base_url = base_url.replace('FR301FC007', 'FR301FC001')
 
-    # ページネーションパラメータの整理（SUUMOは pn= を使用）
     base_url = re.sub(r'&pn=\d+', '', base_url)
     base_url = re.sub(r'&page=\d+', '', base_url)
     separator = '&' if '?' in base_url else '?'
@@ -50,26 +48,20 @@ def scrape_suumo_list(base_url, max_pages=3):
 
     for page in range(1, max_pages + 1):
         status_text.text(f"SUUMOからデータを取得中... (ページ {page}/{max_pages})")
-        
-        # ページ番号を付与
         url = f"{base_url}{separator}pn={page}"
         
         try:
-            # 人間らしさを出すためランダム待機
             time.sleep(random.uniform(1.5, 3.5))
             
             res = session.get(url, headers=headers, timeout=15)
             res.raise_for_status() 
-            res.encoding = res.apparent_encoding # 文字化け防止
+            res.encoding = res.apparent_encoding 
             
             soup = BeautifulSoup(res.content, 'html.parser')
             items = soup.find_all("div", class_="cassetteitem")
             
             if not items:
                 st.warning(f"⚠️ ページ {page} から物件データを抽出できませんでした。データが終了したか、条件に一致する物件がありません。")
-                with st.expander("開発用：サーバーからの返答内容を確認する"):
-                    st.write(f"HTTPステータスコード: {res.status_code}")
-                    st.code(res.text[:1500])
                 break
             
             for item in items:
@@ -96,7 +88,7 @@ def scrape_suumo_list(base_url, max_pages=3):
                 col3 = item.find("li", class_="cassetteitem_detail-col3")
                 col3_divs = col3.find_all("div") if col3 else []
                 age = col3_divs[0].text.strip() if len(col3_divs) > 0 else ""
-                floors = col3_divs[1].text.strip() if len(col3_divs) > 1 else ""
+                bldg_floors = col3_divs[1].text.strip() if len(col3_divs) > 1 else ""
                 
                 # 部屋ごとの情報
                 tbodies = item.find_all("tbody")
@@ -108,6 +100,34 @@ def scrape_suumo_list(base_url, max_pages=3):
                     layout = tbody.find("span", class_="cassetteitem_madori")
                     area = tbody.find("span", class_="cassetteitem_menseki")
                     
+                    # 部屋の階数と取扱店舗名の抽出
+                    tds = tbody.find_all("td")
+                    room_floor = ""
+                    company = ""
+                    for td in tds:
+                        td_text = td.text.strip()
+                        if re.match(r'^\d+階$', td_text) or re.match(r'^B\d+階$', td_text):
+                            room_floor = td_text
+                    
+                    if len(tds) > 0:
+                        company_elem = tds[-1] # 大抵一番右の列が店舗名
+                        company = company_elem.text.strip()
+                    
+                    # 階建の結合 (例: 2階/9階建)
+                    combined_floors = f"{room_floor}/{bldg_floors}" if room_floor and bldg_floors else bldg_floors
+                    
+                    # URLとSUUMOコードの抽出
+                    link_elem = tbody.find("a", class_="js-cassette_link")
+                    url_href = link_elem.get("href") if link_elem else ""
+                    full_url = f"https://suumo.jp{url_href}" if url_href else ""
+                    
+                    suumo_code = ""
+                    if url_href:
+                        m = re.search(r'/(jnc_\d+|bc_\d+)/', url_href)
+                        if m:
+                            suumo_code = m.group(1)
+                    
+                    # 💡要望の全40項目フォーマットに完全合致させる
                     all_data.append({
                         "物件名": title,
                         "家賃": rent.text.strip() if rent else "",
@@ -122,7 +142,33 @@ def scrape_suumo_list(base_url, max_pages=3):
                         "最寄駅2": sta2,
                         "最寄駅3": sta3,
                         "住所": address,
-                        "階建": floors
+                        "階建": combined_floors,
+                        "構造": "",               # 詳細ページ固有の情報はブロック回避のため空欄
+                        "築年月": "",
+                        "設備": "",
+                        "損保": "",
+                        "駐車場": "",
+                        "入居時期": "",
+                        "態様": "",
+                        "条件": "",
+                        "suumoコード": suumo_code,
+                        "情報更新日": "",
+                        "契約期間": "",
+                        "保証会社": "",
+                        "ほか諸費用": "",
+                        "備考": "",
+                        "店舗": company,
+                        "間取り詳細": "",
+                        "エネルギー消費性能": "",
+                        "断熱性能": "",
+                        "目安光熱費": "",
+                        "総戸数": "",
+                        "次回更新予定日": "",
+                        "仲介手数料": "",
+                        "ほか初期費用": "",
+                        "敷金積み増し": "",
+                        "バルコニー面積": "",
+                        "URL": full_url
                     })
             
             progress_bar.progress(page / max_pages)
@@ -139,7 +185,7 @@ def scrape_suumo_list(base_url, max_pages=3):
 # 3. 前処理・データ読み込みエンジン
 # =========================================================
 @st.cache_data
-def analyze_real_estate_data_v7(raw_df, rules_file):
+def analyze_real_estate_data_v8(raw_df, rules_file):
     """
     スクレイピングしたDF、またはアップロードしたDFを受け取り、
     ルールCSVと掛け合わせて分析可能な状態にクレンジングする
@@ -163,7 +209,6 @@ def analyze_real_estate_data_v7(raw_df, rules_file):
 
     df_suumo = raw_df.copy()
 
-    # 家賃と共益費の計算
     rent_col = next((c for c in df_suumo.columns if '家賃' in str(c) or '賃料' in str(c)), None)
     df_suumo['家賃_円'] = df_suumo[rent_col].astype(str).str.extract(r'([\d\.]+)').astype(float) * 10000
     
@@ -182,21 +227,18 @@ def analyze_real_estate_data_v7(raw_df, rules_file):
     df_suumo['㎡単価_家賃のみ'] = df_suumo['家賃_円'] / df_suumo['専有面積_m2']
     df_suumo['㎡単価_総家賃'] = df_suumo['総家賃'] / df_suumo['専有面積_m2']
 
-    # 徒歩分数の抽出
     walk_col = next((c for c in df_suumo.columns if str(c) in ['最寄駅1', '駅1', '徒歩1', '徒歩']), None)
     if walk_col:
         df_suumo['徒歩分数'] = df_suumo[walk_col].astype(str).str.extract(r'(?:歩|徒歩)(\d+)分').astype(float).fillna(10)
     else:
         df_suumo['徒歩分数'] = 10
 
-    # 築年数
     age_col = next((c for c in df_suumo.columns if '築' in str(c) or '数' in str(c)), None)
     if age_col:
         df_suumo['築年'] = df_suumo[age_col].apply(lambda x: 0 if '新築' in str(x) else float(re.search(r'\d+', str(x)).group()) if pd.notna(x) and re.search(r'\d+', str(x)) else 0)
     else:
         df_suumo['築年'] = 0
 
-    # 間取り
     madori_col = next((c for c in df_suumo.columns if '間取' in str(c)), None)
     def map_madori(m):
         m = str(m).upper().replace(' ', '').replace('　', '') 
@@ -212,7 +254,6 @@ def analyze_real_estate_data_v7(raw_df, rules_file):
         return 'その他'
     df_suumo['間取りグループ'] = df_suumo[madori_col].apply(map_madori) if madori_col else '1K・1DK'
 
-    # 建物種別
     type_col = next((c for c in df_suumo.columns if '建物種別' in str(c) or '種別' in str(c)), None)
     if type_col:
         df_suumo['建物種別_判定用'] = df_suumo[type_col].astype(str)
@@ -220,7 +261,6 @@ def analyze_real_estate_data_v7(raw_df, rules_file):
         text_cols = df_suumo.select_dtypes(include=[object]).fillna('').agg(' '.join, axis=1)
         df_suumo['建物種別_判定用'] = text_cols
 
-    # 駅名の抽出
     station_col = next((c for c in df_suumo.columns if '駅1' in str(c) or '最寄駅1' in str(c) or '駅' in str(c)), None)
     def extract_station(text):
         text = str(text).strip()
@@ -295,7 +335,7 @@ with tab1:
     if df_raw is not None and uploaded_rules is not None:
         if st.button("🧠 解析してシミュレーターを起動"):
             with st.spinner("データを解析し、駅ごとの相場とルールを構築しています..."):
-                extracted_rules, df_suumo = analyze_real_estate_data_v7(df_raw, uploaded_rules)
+                extracted_rules, df_suumo = analyze_real_estate_data_v8(df_raw, uploaded_rules)
                 
                 st.session_state['rules'] = extracted_rules
                 st.session_state['df_suumo'] = df_suumo
