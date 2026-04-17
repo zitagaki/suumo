@@ -20,11 +20,10 @@ st.title("🏡 不動産ハイブリッド査定システム (AI × プロの相
 def scrape_suumo_list(base_url, max_pages=3):
     """
     SUUMOの検索結果URLから、指定したページ数分の物件情報をスクレイピングする
-    ロボット検知を避けるためのステルス機能を実装
+    ロボット検知回避 ＋ URLフォーマットの自動補正機能を搭載
     """
     all_data = []
     
-    # 💡強化ポイント: 人間のブラウザ（最新のChrome）を完全に偽装
     session = requests.Session()
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -35,9 +34,15 @@ def scrape_suumo_list(base_url, max_pages=3):
         'Upgrade-Insecure-Requests': '1'
     }
     
-    # ページネーションパラメータの整理
-    base_url = re.sub(r'&page=\d+', '', base_url)
+    # 💡超強力補正：URLが「部屋ごとに表示(FR301FC005等)」だった場合、強制的に「物件ごとに表示(FR301FC001)」に変換する
+    # これにより、HTML構造の違いによるエラーを根絶します。
+    base_url = base_url.replace('FR301FC005', 'FR301FC001')
+    base_url = base_url.replace('FR301FC006', 'FR301FC001')
+    base_url = base_url.replace('FR301FC007', 'FR301FC001')
+
+    # ページネーションパラメータの整理（SUUMOは pn= を使用）
     base_url = re.sub(r'&pn=\d+', '', base_url)
+    base_url = re.sub(r'&page=\d+', '', base_url)
     separator = '&' if '?' in base_url else '?'
     
     progress_bar = st.progress(0)
@@ -46,26 +51,25 @@ def scrape_suumo_list(base_url, max_pages=3):
     for page in range(1, max_pages + 1):
         status_text.text(f"SUUMOからデータを取得中... (ページ {page}/{max_pages})")
         
-        # SUUMOのURLパターンに対応（pageとpnの両方を付与して安全にめくる）
-        url = f"{base_url}{separator}page={page}&pn={page}"
+        # ページ番号を付与
+        url = f"{base_url}{separator}pn={page}"
         
         try:
-            # 💡強化ポイント: 機械的なアクセスと判定されないよう、1.5〜3.5秒のランダムな待機時間を入れる
+            # 人間らしさを出すためランダム待機
             time.sleep(random.uniform(1.5, 3.5))
             
             res = session.get(url, headers=headers, timeout=15)
             res.raise_for_status() 
+            res.encoding = res.apparent_encoding # 文字化け防止
             
-            # 文字化け対策として .text ではなく .content をパースする
             soup = BeautifulSoup(res.content, 'html.parser')
             items = soup.find_all("div", class_="cassetteitem")
             
             if not items:
-                st.warning(f"⚠️ ページ {page} から物件データを抽出できませんでした。データが終了したか、SUUMOにロボットとして検知された可能性があります。")
-                # 💡強化ポイント: ブロックされた原因を探るためのデバッグ画面
+                st.warning(f"⚠️ ページ {page} から物件データを抽出できませんでした。データが終了したか、条件に一致する物件がありません。")
                 with st.expander("開発用：サーバーからの返答内容を確認する"):
                     st.write(f"HTTPステータスコード: {res.status_code}")
-                    st.code(res.text[:1500]) # 返ってきたHTMLの先頭1500文字を表示
+                    st.code(res.text[:1500])
                 break
             
             for item in items:
@@ -265,7 +269,6 @@ with tab1:
             else:
                 st.warning("URLを入力してください。")
                 
-        # 取得済みデータの表示とダウンロード
         if 'raw_df' in st.session_state:
             st.write("取得したデータプレビュー:")
             st.dataframe(st.session_state['raw_df'].head())
