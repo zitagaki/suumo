@@ -1,10 +1,11 @@
 streamlit
 requests
 lxml
+xlsxwriter
 pandas
+numpy
 selenium
 openpyxl
 scikit-learn
 beautifulsoup4
 requests
-lxml
