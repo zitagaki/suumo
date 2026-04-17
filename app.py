@@ -15,8 +15,8 @@ st.title("🏡 不動産ハイブリッド査定システム (AI × プロの相
 @st.cache_data
 def analyze_real_estate_data(suumo_file, rules_file):
     """
-    1. ルールCSVから、加減算の係数を直接読み込む（再計算しない）
-    2. SUUMOデータ(Excel/CSV)から、ベースとなる㎡単価と相場帯のみを算出する
+    1. ルールCSVから、加減算の係数を直接読み込む
+    2. SUUMOデータ(Excel/CSV)をクレンジングし、駅名などの情報を抽出して返す
     """
     # ---------------------------------------------------------
     # ① ルールCSVから係数を抽出
@@ -39,7 +39,7 @@ def analyze_real_estate_data(suumo_file, rules_file):
         extracted_rules[madori] = rule_dict
 
     # ---------------------------------------------------------
-    # ② SUUMOデータから相場帯（ベース単価・ボリュームゾーン）を算出
+    # ② SUUMOデータをクレンジング
     # ---------------------------------------------------------
     try:
         df_suumo = pd.read_excel(suumo_file)
@@ -94,27 +94,26 @@ def analyze_real_estate_data(suumo_file, rules_file):
     else:
         df_suumo['間取りグループ'] = '1K・1DK'
 
-    # 間取りごとのベース単価と相場分布を計算
-    base_tanka_dict = {}
-    market_stats = {}
+    # 駅名の抽出（「京王線/桜上水駅 歩3分」→「桜上水」に加工）
+    def extract_station(text):
+        text = str(text)
+        if '/' in text:
+            text = text.split('/')[-1]
+        if ' 歩' in text:
+            text = text.split(' 歩')[0]
+        if ' バス' in text:
+            text = text.split(' バス')[0]
+        if text.endswith('駅'):
+            text = text[:-1]
+        return text.strip()
 
-    for madori in madori_list:
-        df_m = df_suumo[df_suumo['間取りグループ'] == madori]
-        tanka_series = df_m['㎡単価'].dropna()
-        
-        if len(tanka_series) > 0:
-            base_tanka_dict[madori] = tanka_series.median()
-            market_stats[madori] = {
-                'min_tanka': tanka_series.min(),
-                'max_tanka': tanka_series.max(),
-                'p33_tanka': tanka_series.quantile(0.333),
-                'p67_tanka': tanka_series.quantile(0.667)
-            }
-        else:
-            base_tanka_dict[madori] = 4000 
-            market_stats[madori] = None
+    if '最寄駅1' in df_suumo.columns:
+        df_suumo['駅名'] = df_suumo['最寄駅1'].apply(extract_station)
+    else:
+        df_suumo['駅名'] = '不明'
 
-    return extracted_rules, base_tanka_dict, market_stats
+    # ルールの辞書と、加工済みの生データ(df_suumo)を返す
+    return extracted_rules, df_suumo
 
 # =========================================================
 # 3. UIロジック
@@ -136,11 +135,10 @@ with tab1:
 
     if uploaded_suumo is not None and uploaded_rules is not None:
         with st.spinner("データを解析してエリアの相場・ルールを構築しています..."):
-            extracted_rules, base_tanka_dict, market_stats = analyze_real_estate_data(uploaded_suumo, uploaded_rules)
+            extracted_rules, df_suumo = analyze_real_estate_data(uploaded_suumo, uploaded_rules)
             
             st.session_state['rules'] = extracted_rules
-            st.session_state['base_tanka'] = base_tanka_dict
-            st.session_state['market_stats'] = market_stats
+            st.session_state['df_suumo'] = df_suumo
             
             st.success("✅ データの解析が完了しました！「②詳細査定シミュレーター」タブに移動して査定を行ってください。")
 
@@ -152,19 +150,22 @@ with tab2:
         st.warning("⚠️ 先に「①データのアップロード＆解析」タブでファイルを取り込んでください。")
     else:
         st.subheader("🤖 詳細査定シミュレーター")
-        st.write("アップロードしたルールCSVの係数に基づき、適正な賃料を算出します。")
+        st.write("アップロードしたデータに基づき、対象駅の相場とルール係数を掛け合わせて適正な賃料を算出します。")
         
         rules = st.session_state['rules']
-        bases = st.session_state['base_tanka']
-        stats = st.session_state['market_stats']
+        df_suumo = st.session_state['df_suumo']
 
         valid_layouts = list(rules.keys())
+        # データから重複のない駅リストを作成（空文字やnanを除外）
+        station_list = ['指定なし'] + sorted([s for s in df_suumo['駅名'].unique() if s and str(s) != 'nan' and s != '不明'])
         
-        col1, col2, col3, col4 = st.columns(4)
+        st.markdown("**基本スペック**")
+        col1, col2, col3, col4, col5 = st.columns(5)
         with col1: target_layout = st.selectbox("間取りタイプ", valid_layouts, index=1)
-        with col2: i_area = st.number_input("専有面積 (㎡)", min_value=10.0, max_value=200.0, value=25.0, step=0.5)
-        with col3: i_age = st.number_input("築年数 (年) ※新築は0", min_value=0, max_value=100, value=5)
-        with col4: i_walk = st.number_input("駅徒歩 (分)", min_value=0, max_value=60, value=8)
+        with col2: selected_station = st.selectbox("対象駅", station_list)
+        with col3: i_area = st.number_input("専有面積 (㎡)", min_value=10.0, max_value=200.0, value=25.0, step=0.5)
+        with col4: i_age = st.number_input("築年数 (年) ※新築は0", min_value=0, max_value=100, value=5)
+        with col5: i_walk = st.number_input("駅徒歩 (分)", min_value=0, max_value=60, value=8)
 
         st.markdown("**付加価値・設備条件（チェックで査定額に反映されます）**")
         col5, col6, col7, col8 = st.columns(4)
@@ -193,12 +194,42 @@ with tab2:
         }
 
         # ==========================================
-        # 査定計算ロジック
+        # 査定計算ロジック（駅による相場の絞り込み）
         # ==========================================
+        # 選択された駅と間取りでデータをフィルタリング
+        if selected_station == '指定なし':
+            df_filtered = df_suumo[df_suumo['間取りグループ'] == target_layout]
+            station_label = "当該エリア全体"
+        else:
+            df_filtered = df_suumo[(df_suumo['間取りグループ'] == target_layout) & (df_suumo['駅名'] == selected_station)]
+            station_label = f"{selected_station}駅"
+
+        tanka_series = df_filtered['㎡単価'].dropna()
+        
+        # 絞り込んだ結果、データが存在するかチェック
+        if len(tanka_series) > 0:
+            tanka_base = tanka_series.median()
+            layout_stats = {
+                'min_tanka': tanka_series.min(),
+                'max_tanka': tanka_series.max(),
+                'p33_tanka': tanka_series.quantile(0.333),
+                'p67_tanka': tanka_series.quantile(0.667)
+            }
+        else:
+            # データがない場合はエリア全体の中央値をフォールバック（代用）として使う
+            df_all = df_suumo[df_suumo['間取りグループ'] == target_layout]
+            tanka_all = df_all['㎡単価'].dropna()
+            if len(tanka_all) > 0:
+                tanka_base = tanka_all.median()
+                st.warning(f"⚠️ 指定された「{selected_station}駅」には「{target_layout}」のデータが存在しないため、ベース家賃はエリア全体の相場を使用しています。")
+                layout_stats = None
+            else:
+                tanka_base = 4000
+                layout_stats = None
+
         r = rules.get(target_layout, {})
         
         # 1. ハコ自体の家賃
-        tanka_base = bases.get(target_layout, 4000)
         rent_base = tanka_base * i_area
         
         # 2. 加点・減点の計算
@@ -234,8 +265,6 @@ with tab2:
         # ==========================================
         # 相場分布の取得と上限（キャップ）処理
         # ==========================================
-        layout_stats = stats.get(target_layout)
-        
         display_rent = predicted_rent
         cap_message = "" # 上限に達した場合の注意書き用変数
 
@@ -261,7 +290,7 @@ with tab2:
                 <h3 style="margin:0;color:#333;">設備・条件を反映した推定家賃</h3>
                 <h1 style="margin:0;color:#0066cc;font-size:48px;">{display_rent:,} 円</h1>
                 <p style="color:#666; margin:0;">
-                (エリアベース相場: {int(rent_base):,}円 ＋ 設備加減点: {int(rent_rules):,}円 ＋ 手動調整: {i_premium}円){cap_message}
+                (ベース相場: {int(rent_base):,}円 ＋ 設備加減点: {int(rent_rules):,}円 ＋ 手動調整: {i_premium}円){cap_message}
                 </p>
             </div>
             """, 
@@ -269,7 +298,7 @@ with tab2:
         )
 
         st.markdown("<br><hr>", unsafe_allow_html=True)
-        st.subheader(f"📈 面積 {i_area}㎡ の箱に対する、当該エリアの純粋な相場帯")
+        st.subheader(f"📈 面積 {i_area}㎡ の箱に対する、【{station_label}】の純粋な相場帯")
         st.caption("※設備等を一切考慮せず、同じ間取り・同じ広さの物件が市場でどう分布しているかを示します。")
 
         if layout_stats:
@@ -288,4 +317,4 @@ with tab2:
             else:
                 st.progress(0.5)
         else:
-            st.info("この間取りはSUUMOデータに存在しなかったため、相場分布のメーターは表示されません。")
+            st.info("この間取り（または指定された駅）はデータが少なすぎるため、相場分布のメーターは表示されません。")
