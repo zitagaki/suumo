@@ -111,7 +111,7 @@ def analyze_real_estate_data_v4(suumo_file, rules_file):
         df_suumo['間取りグループ'] = '1K・1DK'
 
     # ---------------------------------------------------------
-    # ③ 駅名の超強力な自動抽出（どんな列名・データでも対応）
+    # ③ 駅名の超強力な自動抽出
     # ---------------------------------------------------------
     target_station_cols = ['駅1', '最寄駅1', '駅', '最寄駅']
     station_col = None
@@ -135,14 +135,10 @@ def analyze_real_estate_data_v4(suumo_file, rules_file):
         if text in ('nan', '', 'None', '-'):
             return '不明'
             
-        # 「歩」「徒歩」「バス」「車」以降をカット
         text = re.split(r'歩|徒歩|バス|車', text)[0].strip()
-        
-        # スラッシュやスペースで分割
         parts = re.split(r'[/ 　]+', text)
         
         station_name = ""
-        # 後ろのブロックから「駅」という文字を探す
         for part in reversed(parts):
             if '駅' in part:
                 station_name = part.replace('駅', '')
@@ -155,10 +151,8 @@ def analyze_real_estate_data_v4(suumo_file, rules_file):
                 station_name = parts[0]
                 
         station_name = station_name.strip()
-        
         if station_name.endswith('駅'):
             station_name = station_name[:-1]
-            
         if station_name.endswith('線'):
             return '不明'
             
@@ -215,9 +209,6 @@ with tab2:
         
         raw_stations = df_suumo['駅名'].unique()
         station_list = ['指定なし'] + sorted([s for s in raw_stations if pd.notna(s) and str(s).strip() not in ['', 'nan', '不明']])
-        
-        if len(station_list) == 1:
-            st.warning("⚠️ データから駅名をうまく抽出できませんでした。データに駅情報が含まれているかご確認ください。")
 
         st.markdown("**基本スペック**")
         col1, col2, col3, col4, col5 = st.columns(5)
@@ -227,7 +218,11 @@ with tab2:
         with col4: i_age = st.number_input("築年数 (年) ※新築は0", min_value=0, max_value=100, value=5)
         with col5: i_walk = st.number_input("駅徒歩 (分)", min_value=0, max_value=60, value=8)
 
-        st.markdown("**付加価値・設備条件（チェックで査定額に反映されます）**")
+        st.markdown("**建物種別 ＆ 設備条件（選択で査定額に反映されます）**")
+        
+        # --- 💡追加：建物種別の選択 ---
+        i_btype = st.radio("建物種別", ["指定なし", "マンション", "アパート"], horizontal=True)
+        
         col5, col6, col7, col8 = st.columns(4)
         with col5:
             i_2f = st.checkbox("2階以上", value=True)
@@ -237,6 +232,8 @@ with tab2:
             i_bt = st.checkbox("バス・トイレ別", value=True)
             i_sh = st.checkbox("洗面所独立", value=False)
             i_wc = st.checkbox("温水洗浄便座", value=False)
+            # --- 💡追加：追い焚き風呂の選択 ---
+            i_oidaki = st.checkbox("追い焚き風呂", value=False)
         with col7:
             i_sys = st.checkbox("システムキッチン", value=False)
             i_dry = st.checkbox("浴室乾燥機", value=False)
@@ -246,9 +243,13 @@ with tab2:
             i_box = st.checkbox("宅配ボックス", value=False)
             i_premium = st.number_input("その他・手動プレミアム (円)", value=0, step=1000)
 
+        # 辞書のキーと画面上の状態を紐付け（ルールCSVの項目名と一致させます）
         selected_features = {
+            'マンション': i_btype == 'マンション',
+            'アパート': i_btype == 'アパート',
             '2階以上': i_2f, '角部屋': i_corner, '南向き': i_south,
             'バス・トイレ別': i_bt, '洗面所独立': i_sh, '温水洗浄便座': i_wc,
+            '追い焚き風呂': i_oidaki,
             'システムキッチン': i_sys, '浴室乾燥機': i_dry, 'インターネット無料': i_net,
             'オートロック': i_auto, '宅配ボックス': i_box
         }
