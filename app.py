@@ -12,9 +12,8 @@ st.title("🏡 不動産ハイブリッド査定システム (AI × プロの相
 # =========================================================
 # 2. 前処理・データ読み込みエンジン
 # =========================================================
-# キャッシュをリフレッシュするために関数名を v2 に変更しています
 @st.cache_data
-def analyze_real_estate_data_v2(suumo_file, rules_file):
+def analyze_real_estate_data_v3(suumo_file, rules_file):
     """
     1. ルールCSVから、加減算の係数を直接読み込む
     2. SUUMOデータ(Excel/CSV)をクレンジングし、駅名などの情報を抽出して返す
@@ -97,9 +96,8 @@ def analyze_real_estate_data_v2(suumo_file, rules_file):
         df_suumo['間取りグループ'] = '1K・1DK'
 
     # ---------------------------------------------------------
-    # ③ 駅名の超強力な自動抽出
+    # ③ 駅名の超強力な自動抽出（沿線名や不要な文字を弾く）
     # ---------------------------------------------------------
-    # データ内の「駅」や「交通」と名の付く列を自動捜索する
     station_col = None
     for col in df_suumo.columns:
         col_str = str(col).replace(' ', '').replace('　', '')
@@ -112,31 +110,36 @@ def analyze_real_estate_data_v2(suumo_file, rules_file):
 
     def extract_station(text):
         text = str(text).strip()
-        if text == 'nan' or text == '' or text == 'None':
+        if text in ('nan', '', 'None', '-'):
             return '不明'
             
-        # 「」で囲まれている場合は中身を最優先
-        m = re.search(r'[「\[【](.+?)[」\]】]', text)
-        if m:
-            text = m.group(1)
-        else:
-            # スラッシュがあれば後ろを取る（路線名/駅名）
-            if '/' in text:
-                text = text.split('/')[-1]
-            # スペースで区切られている場合（路線名 駅名 徒歩）
-            elif ' ' in text or '　' in text:
-                parts = re.split(r'[ 　]+', text)
-                if len(parts) >= 2:
-                    text = parts[1] # たいてい2つ目のブロックが駅名
+        # 1. まず「歩」「徒歩」「バス」「車」以降の不要な文字をカット
+        text = re.split(r'歩|徒歩|バス|車', text)[0].strip()
         
-        # 不要な文字（徒歩、バスなど）以降をバッサリ切る
-        text = re.split(r'歩|徒歩|バス|車', text)[0]
-        text = text.strip()
+        # 2. スラッシュ「/」やスペースでブロックに分割
+        parts = re.split(r'[/ 　]+', text)
         
-        if text.endswith('駅'):
-            text = text[:-1]
+        station_name = ""
+        # 3. 「駅」という文字が含まれているブロックを優先的に探す（後ろから探す）
+        for part in reversed(parts):
+            if '駅' in part:
+                station_name = part.replace('駅', '')
+                break
+        
+        # 4. 「駅」が見つからなかった場合（例：「京王線/桜上水」など）は最後の要素を駅名とみなす
+        if not station_name:
+            if len(parts) > 1:
+                station_name = parts[-1] 
+            else:
+                station_name = parts[0]
+                
+        station_name = station_name.strip()
+        
+        # 5. 明らかに沿線名（〜線）のみの場合は「不明」として除外
+        if station_name.endswith('線'):
+            return '不明'
             
-        return text if text else '不明'
+        return station_name if station_name else '不明'
 
     if station_col:
         df_suumo['駅名'] = df_suumo[station_col].apply(extract_station)
@@ -164,7 +167,7 @@ with tab1:
 
     if uploaded_suumo is not None and uploaded_rules is not None:
         with st.spinner("データを解析し、駅ごとの相場とルールを構築しています..."):
-            extracted_rules, df_suumo = analyze_real_estate_data_v2(uploaded_suumo, uploaded_rules)
+            extracted_rules, df_suumo = analyze_real_estate_data_v3(uploaded_suumo, uploaded_rules)
             
             st.session_state['rules'] = extracted_rules
             st.session_state['df_suumo'] = df_suumo
@@ -188,7 +191,7 @@ with tab2:
         valid_layouts = list(rules.keys())
         default_layout_idx = valid_layouts.index('1K・1DK') if '1K・1DK' in valid_layouts else 0
         
-        # データの駅名からプルダウンの選択肢を作成
+        # データの駅名からプルダウンの選択肢を作成（「不明」は弾く）
         raw_stations = df_suumo['駅名'].unique()
         station_list = ['指定なし'] + sorted([s for s in raw_stations if pd.notna(s) and str(s).strip() not in ['', 'nan', '不明']])
         
@@ -232,7 +235,6 @@ with tab2:
         # ==========================================
         # 査定計算ロジック（駅による相場の絞り込み）
         # ==========================================
-        # プルダウンで選ばれた駅に絞ってデータを取り出す
         if selected_station == '指定なし':
             df_filtered = df_suumo[df_suumo['間取りグループ'] == target_layout]
             station_label = "当該エリア全体"
@@ -243,7 +245,6 @@ with tab2:
         tanka_series = df_filtered['㎡単価'].dropna()
         data_count = len(tanka_series)
         
-        # 絞り込んだ駅にデータが存在するかチェック
         if data_count > 0:
             tanka_base = tanka_series.median()
             layout_stats = {
@@ -253,7 +254,6 @@ with tab2:
                 'p67_tanka': tanka_series.quantile(0.667)
             }
         else:
-            # データがない場合はエリア全体の中央値をフォールバック（代用）として使う
             df_all = df_suumo[df_suumo['間取りグループ'] == target_layout]
             tanka_all = df_all['㎡単価'].dropna()
             if len(tanka_all) > 0:
@@ -274,7 +274,6 @@ with tab2:
         # 2. 加点・減点の計算
         rent_rules = 0
         
-        # 徒歩分数の計算
         tanka_under_10 = r.get('徒歩10分以内単価', 0)
         tanka_over_10 = r.get('徒歩10分超追加単価', 0)
         fixed_penalty = r.get('徒歩10分超固定ペナルティ', 0)
@@ -286,13 +285,11 @@ with tab2:
             rent_rules += fixed_penalty
             rent_rules += ((i_walk - 10) * tanka_over_10) * i_area
         
-        # 築年ペナルティ
         if i_age == 0: rent_rules += r.get('築年_新築単価', 0) * i_area
         elif 1 <= i_age <= 3: rent_rules += r.get('築年_1_3年単価', 0) * i_area
         elif 4 <= i_age <= 6: rent_rules += r.get('築年_4_6年単価', 0) * i_area
         elif 7 <= i_age <= 10: rent_rules += r.get('築年_7_10年単価', 0) * i_area
         
-        # 設備の加点・減点
         for feat_name, is_checked in selected_features.items():
             if is_checked:
                 feat_tanka = r.get(feat_name, 0)
@@ -305,7 +302,7 @@ with tab2:
         # 相場分布の取得と上限（キャップ）処理
         # ==========================================
         display_rent = predicted_rent
-        cap_message = "" # 上限に達した場合の注意書き用変数
+        cap_message = "" 
 
         if layout_stats:
             price_min = int(layout_stats['min_tanka'] * i_area)
@@ -313,9 +310,8 @@ with tab2:
             zone_low = int(layout_stats['p33_tanka'] * i_area)
             zone_high = int(layout_stats['p67_tanka'] * i_area)
 
-            # 💡 推定家賃が「最高価格」を上回った場合の処理
             if predicted_rent > price_max:
-                display_rent = price_max # メイン表示を最高価格で頭打ちにする
+                display_rent = price_max 
                 cap_message = f"<br><span style='color:#e74c3c; font-size:16px; font-weight:bold;'>※相場上限に達したため最高価格を表示しています（参考理論値: {predicted_rent:,} 円）</span>"
         else:
             price_min = price_max = zone_low = zone_high = 0
@@ -337,7 +333,6 @@ with tab2:
         )
 
         st.markdown("<br><hr>", unsafe_allow_html=True)
-        # 件数も合わせて表示することで納得感（信頼感）を出す
         st.subheader(f"📈 面積 {i_area}㎡ の箱に対する、【{station_label}】の純粋な相場帯（データ: {data_count}件）")
         st.caption("※設備等を一切考慮せず、同じ間取り・同じ広さの物件が市場でどう分布しているかを示します。")
 
