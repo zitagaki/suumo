@@ -19,7 +19,7 @@ def analyze_real_estate_data(suumo_file, rules_file):
     2. SUUMOデータ(Excel/CSV)から、ベースとなる㎡単価と相場帯のみを算出する
     """
     # ---------------------------------------------------------
-    # ① ルールCSVから係数を抽出（ユーザーがアップロードした数値をそのまま使う）
+    # ① ルールCSVから係数を抽出
     # ---------------------------------------------------------
     df_rules = pd.read_csv(rules_file)
     extracted_rules = {}
@@ -29,9 +29,8 @@ def analyze_real_estate_data(suumo_file, rules_file):
         rule_dict = {}
         if madori in df_rules.columns:
             for idx, row in df_rules.iterrows():
-                item_name = str(row.iloc[0]).strip() # A列の項目名（「オートロック」など）を取得
+                item_name = str(row.iloc[0]).strip()
                 val = row[madori]
-                # 欠損値やハイフンでなければ数値に変換して辞書に格納
                 if pd.notna(val) and str(val).strip() != '-':
                     try:
                         rule_dict[item_name] = float(val)
@@ -70,7 +69,7 @@ def analyze_real_estate_data(suumo_file, rules_file):
     if area_col:
         df_suumo['専有面積_m2'] = df_suumo[area_col].astype(str).str.extract(r'([\d\.]+)').astype(float)
     else:
-        df_suumo['専有面積_m2'] = 25.0 # 安全対策のデフォルト
+        df_suumo['専有面積_m2'] = 25.0
 
     df_suumo['㎡単価'] = df_suumo['総家賃'] / df_suumo['専有面積_m2']
 
@@ -103,7 +102,6 @@ def analyze_real_estate_data(suumo_file, rules_file):
         df_m = df_suumo[df_suumo['間取りグループ'] == madori]
         tanka_series = df_m['㎡単価'].dropna()
         
-        # データが1件以上あれば相場を算出、なければデフォルト値
         if len(tanka_series) > 0:
             base_tanka_dict[madori] = tanka_series.median()
             market_stats[madori] = {
@@ -113,7 +111,7 @@ def analyze_real_estate_data(suumo_file, rules_file):
                 'p67_tanka': tanka_series.quantile(0.667)
             }
         else:
-            base_tanka_dict[madori] = 4000 # デフォルト相場
+            base_tanka_dict[madori] = 4000 
             market_stats[madori] = None
 
     return extracted_rules, base_tanka_dict, market_stats
@@ -160,11 +158,10 @@ with tab2:
         bases = st.session_state['base_tanka']
         stats = st.session_state['market_stats']
 
-        # 全ての間取りを選択可能にする
         valid_layouts = list(rules.keys())
         
         col1, col2, col3, col4 = st.columns(4)
-        with col1: target_layout = st.selectbox("間取りタイプ", valid_layouts, index=1) # デフォルトを1Kに
+        with col1: target_layout = st.selectbox("間取りタイプ", valid_layouts, index=1)
         with col2: i_area = st.number_input("専有面積 (㎡)", min_value=10.0, max_value=200.0, value=25.0, step=0.5)
         with col3: i_age = st.number_input("築年数 (年) ※新築は0", min_value=0, max_value=100, value=5)
         with col4: i_walk = st.number_input("駅徒歩 (分)", min_value=0, max_value=60, value=8)
@@ -188,7 +185,6 @@ with tab2:
             i_box = st.checkbox("宅配ボックス", value=False)
             i_premium = st.number_input("その他・手動プレミアム (円)", value=0, step=1000)
 
-        # 辞書のキーと、画面上のラベルを一致させる
         selected_features = {
             '2階以上': i_2f, '角部屋': i_corner, '南向き': i_south,
             'バス・トイレ別': i_bt, '洗面所独立': i_sh, '温水洗浄便座': i_wc,
@@ -199,30 +195,25 @@ with tab2:
         # ==========================================
         # 査定計算ロジック
         # ==========================================
-        # アップロードされたCSVから該当間取りのルールを取得
         r = rules.get(target_layout, {})
         
-        # 1. ハコ自体の家賃（ベース単価 × 面積）
+        # 1. ハコ自体の家賃
         tanka_base = bases.get(target_layout, 4000)
         rent_base = tanka_base * i_area
         
-        # 2. 設備や条件による加点・減点の計算
+        # 2. 加点・減点の計算
         rent_rules = 0
         
-        # ⚠️修正箇所：徒歩分数の加減算（10分以内も加味する）
+        # 徒歩分数の計算
         tanka_under_10 = r.get('徒歩10分以内単価', 0)
         tanka_over_10 = r.get('徒歩10分超追加単価', 0)
         fixed_penalty = r.get('徒歩10分超固定ペナルティ', 0)
 
         if i_walk <= 10:
-            # 10分以内の場合： (徒歩分数 × 徒歩10分以内単価) × 面積
             rent_rules += (i_walk * tanka_under_10) * i_area
         else:
-            # 10分超の場合： まず10分までの影響を加算
             rent_rules += (10 * tanka_under_10) * i_area
-            # 10分超えの固定ペナルティを加算（これは「固定」なので面積を掛けない）
             rent_rules += fixed_penalty
-            # 10分を超えた1分ごとの影響を加算
             rent_rules += ((i_walk - 10) * tanka_over_10) * i_area
         
         # 築年ペナルティ
@@ -234,12 +225,32 @@ with tab2:
         # 設備の加点・減点
         for feat_name, is_checked in selected_features.items():
             if is_checked:
-                # 該当設備の係数を取得し、面積を掛けて家賃に反映する
                 feat_tanka = r.get(feat_name, 0)
                 rent_rules += feat_tanka * i_area
         
-        # 3. 最終的な推定家賃
-        predicted_rent = rent_base + rent_rules + i_premium
+        # 3. 理論上の推定家賃
+        predicted_rent = int(rent_base + rent_rules + i_premium)
+
+        # ==========================================
+        # 相場分布の取得と上限（キャップ）処理
+        # ==========================================
+        layout_stats = stats.get(target_layout)
+        
+        display_rent = predicted_rent
+        cap_message = "" # 上限に達した場合の注意書き用変数
+
+        if layout_stats:
+            price_min = int(layout_stats['min_tanka'] * i_area)
+            price_max = int(layout_stats['max_tanka'] * i_area)
+            zone_low = int(layout_stats['p33_tanka'] * i_area)
+            zone_high = int(layout_stats['p67_tanka'] * i_area)
+
+            # 💡 推定家賃が「最高価格」を上回った場合の処理
+            if predicted_rent > price_max:
+                display_rent = price_max # メイン表示を最高価格で頭打ちにする
+                cap_message = f"<br><span style='color:#e74c3c; font-size:16px; font-weight:bold;'>※相場上限に達したため最高価格を表示しています（参考理論値: {predicted_rent:,} 円）</span>"
+        else:
+            price_min = price_max = zone_low = zone_high = 0
 
         # ==========================================
         # 結果表示
@@ -248,9 +259,9 @@ with tab2:
             f"""
             <div style="background-color:#e8f4f8;padding:20px;border-radius:10px;text-align:center;margin-top:20px;">
                 <h3 style="margin:0;color:#333;">設備・条件を反映した推定家賃</h3>
-                <h1 style="margin:0;color:#0066cc;font-size:48px;">{int(predicted_rent):,} 円</h1>
+                <h1 style="margin:0;color:#0066cc;font-size:48px;">{display_rent:,} 円</h1>
                 <p style="color:#666; margin:0;">
-                (エリアベース相場: {int(rent_base):,}円 ＋ 設備・条件加点/減点: {int(rent_rules):,}円 ＋ 手動調整: {i_premium}円)
+                (エリアベース相場: {int(rent_base):,}円 ＋ 設備加減点: {int(rent_rules):,}円 ＋ 手動調整: {i_premium}円){cap_message}
                 </p>
             </div>
             """, 
@@ -259,15 +270,9 @@ with tab2:
 
         st.markdown("<br><hr>", unsafe_allow_html=True)
         st.subheader(f"📈 面積 {i_area}㎡ の箱に対する、当該エリアの純粋な相場帯")
-        st.caption("※設備や徒歩分数を一切考慮せず、同じ間取り・同じ広さの物件が市場でどう分布しているかを示します。")
+        st.caption("※設備等を一切考慮せず、同じ間取り・同じ広さの物件が市場でどう分布しているかを示します。")
 
-        layout_stats = stats.get(target_layout)
         if layout_stats:
-            price_min = int(layout_stats['min_tanka'] * i_area)
-            price_max = int(layout_stats['max_tanka'] * i_area)
-            zone_low = int(layout_stats['p33_tanka'] * i_area)
-            zone_high = int(layout_stats['p67_tanka'] * i_area)
-
             colA, colB, colC = st.columns(3)
             with colA:
                 st.metric(label="最低価格目安", value=f"{price_min:,} 円")
@@ -276,9 +281,9 @@ with tab2:
             with colC:
                 st.metric(label="最高価格目安", value=f"{price_max:,} 円")
 
-            st.caption(f"▼ 今回の推定家賃（{int(predicted_rent):,}円）が、市場全体のどの位置にいるかの目安")
+            st.caption(f"▼ 今回の推定家賃（{display_rent:,}円）が、市場全体のどの位置にいるかの目安")
             if price_max > price_min:
-                progress_val = (predicted_rent - price_min) / (price_max - price_min)
+                progress_val = (display_rent - price_min) / (price_max - price_min)
                 st.progress(min(1.0, max(0.0, progress_val)))
             else:
                 st.progress(0.5)
