@@ -19,9 +19,6 @@ st.title("🏡 不動産ハイブリッド査定システム (AI × プロの相
 # 2. スクレイピングエンジン (XPath対応・詳細ページ完全巡回・重複削除)
 # =========================================================
 def get_xpath_text(tree, xpath_str):
-    """
-    指定されたXPathからテキストを抽出するヘルパー関数
-    """
     try:
         elements = tree.xpath(xpath_str)
         if not elements and '/tbody' in xpath_str:
@@ -221,12 +218,8 @@ def scrape_suumo_list(base_url, max_pages=3):
     
     df = pd.DataFrame(all_data)
     
-    # =========================================================
-    # 💡 ユーザー要望：重複データの完全削除ロジック
-    # =========================================================
     if not df.empty:
         before_count = len(df)
-        # 指定された6項目が「全て完全一致」する場合のみ、重複とみなして1件だけ残す
         df = df.drop_duplicates(subset=['物件名', '家賃', '共益費', '間取り', '専有面積', '階建'], keep='first')
         after_count = len(df)
         removed_count = before_count - after_count
@@ -240,7 +233,7 @@ def scrape_suumo_list(base_url, max_pages=3):
 # 3. 前処理・データ読み込みエンジン
 # =========================================================
 @st.cache_data
-def analyze_real_estate_data_v11(raw_df, rules_file):
+def analyze_real_estate_data_v12(raw_df, rules_file):
     df_rules = pd.read_csv(rules_file)
     extracted_rules = {}
     madori_list = ['ワンルーム', '1K・1DK', '1LDK', '2K・2DK', '2LDK', '3K・3DK', '3LDK']
@@ -386,7 +379,7 @@ with tab1:
     if df_raw is not None and uploaded_rules is not None:
         if st.button("🧠 解析してシミュレーターを起動"):
             with st.spinner("データを解析し、駅ごとの相場とルールを構築しています..."):
-                extracted_rules, df_suumo = analyze_real_estate_data_v11(df_raw, uploaded_rules)
+                extracted_rules, df_suumo = analyze_real_estate_data_v12(df_raw, uploaded_rules)
                 
                 st.session_state['rules'] = extracted_rules
                 st.session_state['df_suumo'] = df_suumo
@@ -538,8 +531,10 @@ with tab2:
         )
 
         st.markdown("<br><hr>", unsafe_allow_html=True)
+        
+        # 1つ目のメーター（理論値ベース）
         st.subheader(f"📈 面積 {i_area}㎡ の箱に対する、【{station_label}】の純粋な相場帯（データ: {data_count}件）")
-        st.caption(f"※設備等を一切考慮せず、同じ間取り・同じ広さの{i_btype}が市場でどう分布しているかを示します。")
+        st.caption(f"※設備等を一切考慮せず、同じ間取り・同じ広さの{i_btype}が市場でどう分布しているかを示す「理論値」の目安です。")
 
         if data_count > 0:
             colA, colB, colC = st.columns(3)
@@ -553,5 +548,35 @@ with tab2:
                 st.progress(min(1.0, max(0.0, progress_val)))
             else:
                 st.progress(0.5)
+
+            # -----------------------------------------------------
+            # 💡 追加：2つ目のメーター（実際の家賃データに基づく分布）
+            # -----------------------------------------------------
+            st.markdown("<br><br>", unsafe_allow_html=True)
+            
+            # 家賃のみ/総家賃 の設定に応じて列を引っ張る
+            rent_col_actual = '総家賃' if calc_mode == "家賃＋共益費（総家賃）で計算" else '家賃_円'
+            actual_rent_series = df_suumo[mask_base][rent_col_actual].dropna()
+            
+            st.subheader(f"📊 【{target_layout}】の実際の家賃分布（面積換算なし / データ: {data_count}件）")
+            st.caption(f"※入力された面積({i_area}㎡)に関わらず、指定された条件（{station_label}・{target_layout}）で現在募集されている物件の「実際の価格」の分布です。")
+            
+            actual_min = int(actual_rent_series.min())
+            actual_max = int(actual_rent_series.max())
+            actual_zone_low = int(actual_rent_series.quantile(0.333))
+            actual_zone_high = int(actual_rent_series.quantile(0.667))
+            
+            colD, colE, colF = st.columns(3)
+            with colD: st.metric(label="実際の最低家賃", value=f"{actual_min:,} 円")
+            with colE: st.metric(label="ボリュームゾーン (中核33%)", value=f"{actual_zone_low:,} 〜 {actual_zone_high:,} 円", delta="実際の募集価格の中心帯")
+            with colF: st.metric(label="実際の最高家賃", value=f"{actual_max:,} 円")
+            
+            st.caption(f"▼ 今回の推定家賃（{display_rent:,}円）が、実際に出回っている物件の中でどの位置にいるかの目安")
+            if actual_max > actual_min:
+                progress_val_actual = (display_rent - actual_min) / (actual_max - actual_min)
+                st.progress(min(1.0, max(0.0, progress_val_actual)))
+            else:
+                st.progress(0.5)
+                
         else:
             st.info("条件に一致するデータがないため、相場分布のメーターは表示されません。")
