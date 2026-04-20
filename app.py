@@ -16,7 +16,7 @@ st.set_page_config(page_title="不動産ハイブリッド査定システム", l
 st.title("🏡 不動産ハイブリッド査定システム (AI × プロの相場観)")
 
 # =========================================================
-# 2. スクレイピングエンジン (XPath対応・詳細ページ完全巡回・重複削除)
+# 2. スクレイピングエンジン
 # =========================================================
 def get_xpath_text(tree, xpath_str):
     try:
@@ -34,7 +34,8 @@ def get_xpath_text(tree, xpath_str):
         pass
     return ""
 
-def scrape_suumo_list(base_url, max_pages=3):
+# 💡 引数に待機時間の変数（p_min, p_max, d_min, d_max）を追加
+def scrape_suumo_list(base_url, max_pages, p_min, p_max, d_min, d_max):
     all_data = []
     
     session = requests.Session()
@@ -61,7 +62,10 @@ def scrape_suumo_list(base_url, max_pages=3):
         url = f"{base_url}{separator}pn={page}"
         
         try:
-            time.sleep(random.uniform(1.0, 2.0))
+            # 💡 一覧ページ遷移時のカスタム待機時間
+            wait_time = random.uniform(p_min, p_max)
+            status_text.text(f"ページ遷移の待機中... ({wait_time:.1f}秒)")
+            time.sleep(wait_time)
             
             res = session.get(url, headers=headers, timeout=15)
             res.raise_for_status() 
@@ -103,7 +107,7 @@ def scrape_suumo_list(base_url, max_pages=3):
                 tbodies = item.find_all("tbody")
                 for tbody in tbodies:
                     room_count += 1
-                    status_text.text(f"🚀 詳細ページから全項目を精密抽出中... (P{page} : {room_count}/{total_rooms}部屋目)")
+                    status_text.text(f"🚀 詳細ページ取得中... (P{page} : {room_count}/{total_rooms}部屋目)")
                     
                     rent = tbody.find("span", class_="cassetteitem_price cassetteitem_price--rent")
                     admin = tbody.find("span", class_="cassetteitem_price cassetteitem_price--administration")
@@ -136,7 +140,9 @@ def scrape_suumo_list(base_url, max_pages=3):
 
                     if full_url:
                         try:
-                            time.sleep(random.uniform(0.3, 0.8))
+                            # 💡 詳細ページ取得時のカスタム待機時間
+                            time.sleep(random.uniform(d_min, d_max))
+                            
                             d_res = session.get(full_url, headers=headers, timeout=10)
                             d_tree = lxml.html.fromstring(d_res.content)
                             
@@ -233,7 +239,7 @@ def scrape_suumo_list(base_url, max_pages=3):
 # 3. 前処理・データ読み込みエンジン
 # =========================================================
 @st.cache_data
-def analyze_real_estate_data_v12(raw_df, rules_file):
+def analyze_real_estate_data_v13(raw_df, rules_file):
     df_rules = pd.read_csv(rules_file)
     extracted_rules = {}
     madori_list = ['ワンルーム', '1K・1DK', '1LDK', '2K・2DK', '2LDK', '3K・3DK', '3LDK']
@@ -341,10 +347,30 @@ with tab1:
         target_url = st.text_input("SUUMOの検索結果URLを貼り付けてください", placeholder="https://suumo.jp/jj/chintai/ichiran/...")
         max_pages = st.number_input("取得する最大ページ数", min_value=1, max_value=100, value=3)
         
+        # 💡 カスタム待機時間の設定パネル
+        with st.expander("⚙️ スクレイピング待機時間の設定（ブロック対策）", expanded=False):
+            st.markdown("SUUMOからのロボット検知（アクセスブロック）を避けるための待機時間（秒）です。ページ数が多い場合やブロックされる場合は、秒数を長めに設定してください。")
+            col_w1, col_w2 = st.columns(2)
+            with col_w1:
+                st.markdown("**▼ 1件取得（詳細ページ）ごとの待機**")
+                d_min = st.number_input("最短待機 (秒)", min_value=0.1, max_value=10.0, value=1.0, step=0.5, help="部屋ごとの詳細ページを開く前の最低待機時間")
+                d_max = st.number_input("最長待機 (秒)", min_value=0.1, max_value=15.0, value=2.5, step=0.5, help="部屋ごとの詳細ページを開く前の最大待機時間")
+            with col_w2:
+                st.markdown("**▼ ページ遷移（次のページへ）の待機**")
+                p_min = st.number_input("最短待機 (秒)", min_value=1.0, max_value=30.0, value=3.0, step=1.0, help="一覧の次のページへ進む前の最低待機時間")
+                p_max = st.number_input("最長待機 (秒)", min_value=1.0, max_value=30.0, value=5.0, step=1.0, help="一覧の次のページへ進む前の最大待機時間")
+                
+            # エラー防止：最小値が最大値を上回らないように自動補正
+            p_min_actual = min(p_min, p_max)
+            p_max_actual = max(p_min, p_max)
+            d_min_actual = min(d_min, d_max)
+            d_max_actual = max(d_min, d_max)
+
         if st.button("🚀 データを取得する"):
             if target_url:
-                with st.spinner("SUUMOから全物件の詳細データを自動収集しています（※詳細ページを巡回するため少し時間がかかります）..."):
-                    scraped_df = scrape_suumo_list(target_url, max_pages)
+                with st.spinner("SUUMOから全物件の詳細データを自動収集しています（※設定した待機時間に応じて処理に時間がかかります）..."):
+                    # 💡 カスタム変数を渡して実行
+                    scraped_df = scrape_suumo_list(target_url, max_pages, p_min_actual, p_max_actual, d_min_actual, d_max_actual)
                     if not scraped_df.empty:
                         st.session_state['raw_df'] = scraped_df
                         st.success("✅ データの取得と重複クレンジングが完了しました！")
@@ -379,7 +405,7 @@ with tab1:
     if df_raw is not None and uploaded_rules is not None:
         if st.button("🧠 解析してシミュレーターを起動"):
             with st.spinner("データを解析し、駅ごとの相場とルールを構築しています..."):
-                extracted_rules, df_suumo = analyze_real_estate_data_v12(df_raw, uploaded_rules)
+                extracted_rules, df_suumo = analyze_real_estate_data_v13(df_raw, uploaded_rules)
                 
                 st.session_state['rules'] = extracted_rules
                 st.session_state['df_suumo'] = df_suumo
@@ -532,7 +558,6 @@ with tab2:
 
         st.markdown("<br><hr>", unsafe_allow_html=True)
         
-        # 1つ目のメーター（理論値ベース）
         st.subheader(f"📈 面積 {i_area}㎡ の箱に対する、【{station_label}】の純粋な相場帯（データ: {data_count}件）")
         st.caption(f"※設備等を一切考慮せず、同じ間取り・同じ広さの{i_btype}が市場でどう分布しているかを示す「理論値」の目安です。")
 
@@ -549,12 +574,8 @@ with tab2:
             else:
                 st.progress(0.5)
 
-            # -----------------------------------------------------
-            # 💡 追加：2つ目のメーター（実際の家賃データに基づく分布）
-            # -----------------------------------------------------
             st.markdown("<br><br>", unsafe_allow_html=True)
             
-            # 家賃のみ/総家賃 の設定に応じて列を引っ張る
             rent_col_actual = '総家賃' if calc_mode == "家賃＋共益費（総家賃）で計算" else '家賃_円'
             actual_rent_series = df_suumo[mask_base][rent_col_actual].dropna()
             
