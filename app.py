@@ -16,7 +16,7 @@ st.set_page_config(page_title="不動産ハイブリッド査定システム", l
 st.title("🏡 不動産ハイブリッド査定システム (AI × プロの相場観)")
 
 # =========================================================
-# 2. スクレイピングエンジン
+# 2. スクレイピングエンジン (セーフティネット搭載版)
 # =========================================================
 def get_xpath_text(tree, xpath_str):
     try:
@@ -34,9 +34,9 @@ def get_xpath_text(tree, xpath_str):
         pass
     return ""
 
-# 💡 引数に待機時間の変数（p_min, p_max, d_min, d_max）を追加
 def scrape_suumo_list(base_url, max_pages, p_min, p_max, d_min, d_max):
     all_data = []
+    error_msg = "" # 💡 どこでエラーが起きたかを記録する変数
     
     session = requests.Session()
     headers = {
@@ -62,12 +62,17 @@ def scrape_suumo_list(base_url, max_pages, p_min, p_max, d_min, d_max):
         url = f"{base_url}{separator}pn={page}"
         
         try:
-            # 💡 一覧ページ遷移時のカスタム待機時間
             wait_time = random.uniform(p_min, p_max)
             status_text.text(f"ページ遷移の待機中... ({wait_time:.1f}秒)")
             time.sleep(wait_time)
             
             res = session.get(url, headers=headers, timeout=15)
+            
+            # 💡 一覧ページでのブロック(403)を検知して即座に安全停止
+            if res.status_code == 403:
+                error_msg = f"一覧ページ（{page}ページ目）でSUUMOのアクセス制限（403 Forbidden）を検知しました。"
+                break
+                
             res.raise_for_status() 
             res.encoding = res.apparent_encoding 
             
@@ -75,7 +80,7 @@ def scrape_suumo_list(base_url, max_pages, p_min, p_max, d_min, d_max):
             items = soup.find_all("div", class_="cassetteitem")
             
             if not items:
-                st.warning(f"⚠️ ページ {page} から物件データを抽出できませんでした。")
+                st.warning(f"⚠️ ページ {page} から物件データを抽出できませんでした。（データが終了した可能性があります）")
                 break
                 
             total_rooms = sum([len(item.find_all("tbody")) for item in items])
@@ -107,7 +112,7 @@ def scrape_suumo_list(base_url, max_pages, p_min, p_max, d_min, d_max):
                 tbodies = item.find_all("tbody")
                 for tbody in tbodies:
                     room_count += 1
-                    status_text.text(f"🚀 詳細ページ取得中... (P{page} : {room_count}/{total_rooms}部屋目)")
+                    status_text.text(f"🚀 詳細ページから全項目を精密抽出中... (P{page} : {room_count}/{total_rooms}部屋目)")
                     
                     rent = tbody.find("span", class_="cassetteitem_price cassetteitem_price--rent")
                     admin = tbody.find("span", class_="cassetteitem_price cassetteitem_price--administration")
@@ -140,10 +145,14 @@ def scrape_suumo_list(base_url, max_pages, p_min, p_max, d_min, d_max):
 
                     if full_url:
                         try:
-                            # 💡 詳細ページ取得時のカスタム待機時間
                             time.sleep(random.uniform(d_min, d_max))
-                            
                             d_res = session.get(full_url, headers=headers, timeout=10)
+                            
+                            # 💡 詳細ページでのブロック(403)を検知して即座に安全停止
+                            if d_res.status_code == 403:
+                                error_msg = f"詳細ページの取得中（{page}ページ目）にSUUMOのアクセス制限（403 Forbidden）を検知しました。"
+                                break # 部屋ループを抜ける
+                                
                             d_tree = lxml.html.fromstring(d_res.content)
                             
                             kouzou = get_xpath_text(d_tree, '//*[@id="contents"]/div[4]/table/tbody/tr[1]/td[2]')
@@ -167,6 +176,8 @@ def scrape_suumo_list(base_url, max_pages, p_min, p_max, d_min, d_max):
                                         v = re.sub(r'\s+', ' ', tds_detail[i].text_content()).strip()
                                         detail_dict[k] = v
                                         
+                        except requests.exceptions.Timeout:
+                            pass # 軽いタイムアウトは無視して次の部屋へ
                         except Exception:
                             pass
 
@@ -212,15 +223,28 @@ def scrape_suumo_list(base_url, max_pages, p_min, p_max, d_min, d_max):
                         "バルコニー面積": detail_dict.get("バルコニー面積", ""),
                         "URL": full_url
                     })
+                
+                # エラー検知時は外側のループも即座に抜ける
+                if error_msg:
+                    break
             
             progress_bar.progress(page / max_pages)
-            
+            if error_msg:
+                break
+                
+        # 💡 通信タイムアウトなどの致命的エラーもキャッチして安全停止
+        except requests.exceptions.Timeout:
+            error_msg = f"ページ {page} で通信タイムアウトが発生しました。SUUMOサーバーの応答が遅延しています。"
+            break
         except Exception as e:
-            st.error(f"スクレイピング中にエラーが発生しました: {e}")
+            error_msg = f"ページ {page} で予期せぬエラーが発生しました: {str(e)}"
             break
             
     progress_bar.empty()
-    status_text.success("✅ 全ての詳細データの取得が完了しました！")
+    if error_msg:
+        status_text.warning("⚠️ 制限検知のため、取得処理を安全に中断しました。")
+    else:
+        status_text.success("✅ 全ての詳細データの取得が完了しました！")
     
     df = pd.DataFrame(all_data)
     
@@ -231,15 +255,16 @@ def scrape_suumo_list(base_url, max_pages, p_min, p_max, d_min, d_max):
         removed_count = before_count - after_count
         
         if removed_count > 0:
-            st.info(f"✨ 自動クレンジング: 複数会社から出稿されていた同一物件の重複を {removed_count} 件 削除しました。（取得実数: {after_count}件）")
+            st.info(f"✨ 自動クレンジング: 複数会社から出稿されていた同一物件の重複を {removed_count} 件 削除しました。（実数: {after_count}件）")
             
-    return df
+    # 💡 取得データとともに、エラー内容も返す
+    return df, error_msg
 
 # =========================================================
 # 3. 前処理・データ読み込みエンジン
 # =========================================================
 @st.cache_data
-def analyze_real_estate_data_v13(raw_df, rules_file):
+def analyze_real_estate_data_v14(raw_df, rules_file):
     df_rules = pd.read_csv(rules_file)
     extracted_rules = {}
     madori_list = ['ワンルーム', '1K・1DK', '1LDK', '2K・2DK', '2LDK', '3K・3DK', '3LDK']
@@ -331,7 +356,7 @@ def analyze_real_estate_data_v13(raw_df, rules_file):
 # =========================================================
 # 4. UIロジック
 # =========================================================
-tab1, tab2 = st.tabs(["📂 ①データの取得＆解析 (スクレイピング対応)", "🤖 ②詳細査定シミュレーター"])
+tab1, tab2, tab3 = st.tabs(["📂 ①データの取得＆解析", "🤖 ②詳細査定シミュレーター", "🗺️ ③マップ・㎡単価分析"])
 
 # ---------------------------------------------------------
 # TAB 1: アップロード / スクレイピング画面
@@ -347,35 +372,40 @@ with tab1:
         target_url = st.text_input("SUUMOの検索結果URLを貼り付けてください", placeholder="https://suumo.jp/jj/chintai/ichiran/...")
         max_pages = st.number_input("取得する最大ページ数", min_value=1, max_value=100, value=3)
         
-        # 💡 カスタム待機時間の設定パネル
         with st.expander("⚙️ スクレイピング待機時間の設定（ブロック対策）", expanded=False):
             st.markdown("SUUMOからのロボット検知（アクセスブロック）を避けるための待機時間（秒）です。ページ数が多い場合やブロックされる場合は、秒数を長めに設定してください。")
             col_w1, col_w2 = st.columns(2)
             with col_w1:
                 st.markdown("**▼ 1件取得（詳細ページ）ごとの待機**")
-                d_min = st.number_input("最短待機 (秒)", min_value=0.1, max_value=10.0, value=1.0, step=0.5, help="部屋ごとの詳細ページを開く前の最低待機時間")
-                d_max = st.number_input("最長待機 (秒)", min_value=0.1, max_value=15.0, value=2.5, step=0.5, help="部屋ごとの詳細ページを開く前の最大待機時間")
+                d_min = st.number_input("最短待機 (秒)", min_value=0.1, max_value=10.0, value=1.0, step=0.5)
+                d_max = st.number_input("最長待機 (秒)", min_value=0.1, max_value=15.0, value=2.5, step=0.5)
             with col_w2:
                 st.markdown("**▼ ページ遷移（次のページへ）の待機**")
-                p_min = st.number_input("最短待機 (秒)", min_value=1.0, max_value=30.0, value=3.0, step=1.0, help="一覧の次のページへ進む前の最低待機時間")
-                p_max = st.number_input("最長待機 (秒)", min_value=1.0, max_value=30.0, value=5.0, step=1.0, help="一覧の次のページへ進む前の最大待機時間")
+                p_min = st.number_input("最短待機 (秒)", min_value=1.0, max_value=30.0, value=3.0, step=1.0)
+                p_max = st.number_input("最長待機 (秒)", min_value=1.0, max_value=30.0, value=5.0, step=1.0)
                 
-            # エラー防止：最小値が最大値を上回らないように自動補正
-            p_min_actual = min(p_min, p_max)
-            p_max_actual = max(p_min, p_max)
-            d_min_actual = min(d_min, d_max)
-            d_max_actual = max(d_min, d_max)
+            p_min_actual, p_max_actual = min(p_min, p_max), max(p_min, p_max)
+            d_min_actual, d_max_actual = min(d_min, d_max), max(d_min, d_max)
 
         if st.button("🚀 データを取得する"):
             if target_url:
                 with st.spinner("SUUMOから全物件の詳細データを自動収集しています（※設定した待機時間に応じて処理に時間がかかります）..."):
-                    # 💡 カスタム変数を渡して実行
-                    scraped_df = scrape_suumo_list(target_url, max_pages, p_min_actual, p_max_actual, d_min_actual, d_max_actual)
+                    # 💡 関数からデータとエラー内容の2つを受け取る
+                    scraped_df, error_msg = scrape_suumo_list(target_url, max_pages, p_min_actual, p_max_actual, d_min_actual, d_max_actual)
+                    
                     if not scraped_df.empty:
                         st.session_state['raw_df'] = scraped_df
-                        st.success("✅ データの取得と重複クレンジングが完了しました！")
+                        
+                        # 💡 エラーで中断された場合のレスキュー表示
+                        if error_msg:
+                            st.warning(f"⚠️ **取得中断のお知らせ**\n\n{error_msg}\n\nロボット対策による制限がかかりましたが、**そこまでに取得できた {len(scraped_df)} 件のデータ** は安全に保存されました！下のボタンからダウンロード・解析へ進めます。")
+                        else:
+                            st.success("✅ データの取得と重複クレンジングが完了しました！")
                     else:
-                        st.error("データの取得に失敗しました。URLが正しいか確認してください。")
+                        if error_msg:
+                            st.error(f"データの取得に失敗しました。\n原因: {error_msg}")
+                        else:
+                            st.error("データの取得に失敗しました。URLが正しいか確認してください。")
             else:
                 st.warning("URLを入力してください。")
                 
@@ -405,7 +435,7 @@ with tab1:
     if df_raw is not None and uploaded_rules is not None:
         if st.button("🧠 解析してシミュレーターを起動"):
             with st.spinner("データを解析し、駅ごとの相場とルールを構築しています..."):
-                extracted_rules, df_suumo = analyze_real_estate_data_v13(df_raw, uploaded_rules)
+                extracted_rules, df_suumo = analyze_real_estate_data_v14(df_raw, uploaded_rules)
                 
                 st.session_state['rules'] = extracted_rules
                 st.session_state['df_suumo'] = df_suumo
