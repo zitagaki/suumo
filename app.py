@@ -263,7 +263,7 @@ def scrape_suumo_list(base_url, max_pages, p_min, p_max, d_min, d_max):
 # 3. 前処理・データ読み込みエンジン
 # =========================================================
 @st.cache_data
-def analyze_real_estate_data_v16(raw_df, rules_file):
+def analyze_real_estate_data_v17(raw_df, rules_file):
     df_rules = pd.read_csv(rules_file)
     extracted_rules = {}
     madori_list = ['ワンルーム', '1K・1DK', '1LDK', '2K・2DK', '2LDK', '3K・3DK', '3LDK']
@@ -427,11 +427,10 @@ with tab1:
     if df_raw is not None and uploaded_rules is not None:
         if st.button("🧠 解析してシミュレーターを起動"):
             with st.spinner("データを解析し、駅ごとの相場とルールを構築しています..."):
-                extracted_rules, df_suumo = analyze_real_estate_data_v16(df_raw, uploaded_rules)
+                extracted_rules, df_suumo = analyze_real_estate_data_v17(df_raw, uploaded_rules)
                 
                 st.session_state['rules'] = extracted_rules
                 st.session_state['df_suumo'] = df_suumo
-                # 💡 新しいデータを読み込んだら古い地図データをリセットする
                 if 'map_df' in st.session_state:
                     del st.session_state['map_df']
                 
@@ -620,7 +619,7 @@ with tab2:
             st.info("条件に一致するデータがないため、相場分布のメーターは表示されません。")
 
 # ---------------------------------------------------------
-# TAB 3: マップ・単価分析画面 (UI統一・表示維持版・日本の住所対応)
+# TAB 3: マップ・単価分析画面 (絶対表示・3段構えエンジン)
 # ---------------------------------------------------------
 with tab3:
     if 'df_suumo' not in st.session_state:
@@ -665,7 +664,6 @@ with tab3:
             m_auto = st.checkbox("オートロック", value=False, key='mauto')
             m_box = st.checkbox("宅配ボックス", value=False, key='mbox')
 
-        # --- フィルタリング実行 ---
         filtered_df = df[
             (df['間取りグループ'].isin(map_layouts)) &
             (df['専有面積_m2'] >= map_min_area) &
@@ -700,25 +698,67 @@ with tab3:
 
         if st.button("🗺️ 絞り込んだ条件でマップを更新・描画する"):
             with st.spinner("住所を座標に変換しています...少々お待ちください。"):
-                geolocator = Nominatim(user_agent="suumo_real_estate_analyzer_v2")
-                geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1.0)
+                geolocator = Nominatim(user_agent=f"suumo_analyzer_{random.randint(1000,9999)}")
                 
-                # 💡【対策1】無料の地図システムは「〇丁目〇番地」などの日本の細かい住所が苦手なため、
-                # 正規表現を使って住所の末尾にある数字（〇丁目など）をカットし、町名までに補正して検索させる
-                def clean_address(addr):
-                    return re.sub(r'[\d０-９\-ー]+.*$', '', str(addr))
+                lats = []
+                lons = []
                 
-                filtered_df['検索用住所'] = filtered_df['住所'].apply(clean_address)
-                filtered_df['location'] = filtered_df['検索用住所'].apply(geocode)
+                # 💡 プログレスバーの追加
+                progress_bar_map = st.progress(0)
+                status_text_map = st.empty()
                 
-                filtered_df['緯度'] = filtered_df['location'].apply(lambda loc: loc.latitude if loc else None)
-                filtered_df['経度'] = filtered_df['location'].apply(lambda loc: loc.longitude if loc else None)
+                total_items = len(filtered_df)
                 
-                # 💡【対策2】同じ町名の物件はピンが全く同じ場所に配置されてしまい重なって見えなくなるため、
-                # 乱数を使ってピンの位置をわずかに（数十メートルほど）バラバラに散らすジッター処理
+                # 💡 3段構えの座標取得エンジン
+                for i, (idx, row) in enumerate(filtered_df.iterrows()):
+                    raw_addr = str(row['住所'])
+                    clean_addr = re.sub(r'[\d０-９\-ー]+.*$', '', raw_addr)
+                    lat, lon = None, None
+                    
+                    try:
+                        time.sleep(1.0) # サーバーへの配慮
+                        
+                        # トライ1: 町名で検索
+                        loc = geolocator.geocode(clean_addr, timeout=5)
+                        if loc:
+                            lat, lon = loc.latitude, loc.longitude
+                        else:
+                            # トライ2: 最寄駅で検索（精度高）
+                            pref_match = re.search(r'^(.{2,3}[都道府県])', raw_addr)
+                            pref = pref_match.group(1) if pref_match else "東京都"
+                            station = str(row['駅名'])
+                            if station != '不明':
+                                time.sleep(1.0)
+                                loc_sta = geolocator.geocode(f"{station}駅, {pref}", timeout=5)
+                                if loc_sta:
+                                    lat, lon = loc_sta.latitude, loc_sta.longitude
+                                else:
+                                    # トライ3: 市区町村で検索（最終手段）
+                                    city_match = re.search(r'^(.+?[市区町村])', raw_addr)
+                                    if city_match:
+                                        time.sleep(1.0)
+                                        loc_city = geolocator.geocode(city_match.group(1), timeout=5)
+                                        if loc_city:
+                                            lat, lon = loc_city.latitude, loc_city.longitude
+                    except Exception:
+                        pass
+                        
+                    lats.append(lat)
+                    lons.append(lon)
+                    
+                    progress_bar_map.progress((i + 1) / total_items)
+                    status_text_map.text(f"座標変換中... ({i + 1}/{total_items}件 完了)")
+                    
+                progress_bar_map.empty()
+                status_text_map.empty()
+                
+                filtered_df['緯度'] = lats
+                filtered_df['経度'] = lons
+                
+                # 💡 ジッター処理（ピンが完全に重ならないように数十メートル散らす）
                 def add_jitter(val):
                     if pd.notna(val):
-                        return val + random.uniform(-0.0015, 0.0015)
+                        return val + random.uniform(-0.002, 0.002)
                     return val
                     
                 filtered_df['緯度'] = filtered_df['緯度'].apply(add_jitter)
