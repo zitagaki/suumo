@@ -22,7 +22,7 @@ if 'scraping_log' not in st.session_state:
 st.title("🏡 不動産ハイブリッド査定システム (AI × プロの相場観)")
 
 # =========================================================
-# 2. スクレイピングエンジン (逐次セーブ・フルデータ取得版)
+# 2. スクレイピングエンジン (開始ページ指定・再開ナビ搭載)
 # =========================================================
 def get_xpath_text(tree, xpath_str):
     try:
@@ -37,7 +37,7 @@ def get_xpath_text(tree, xpath_str):
     except Exception: pass
     return ""
 
-def scrape_suumo_list_incremental(base_url, max_pages, p_min, p_max, d_min, d_max):
+def scrape_suumo_list_incremental(base_url, start_page, max_pages, p_min, p_max, d_min, d_max):
     session = requests.Session()
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -56,7 +56,11 @@ def scrape_suumo_list_incremental(base_url, max_pages, p_min, p_max, d_min, d_ma
     status_text = st.empty()
     new_data = []
 
-    for page in range(1, max_pages + 1):
+    # 💡 start_page から指定ページ数分だけループを回す
+    end_page = start_page + max_pages
+    current_progress = 0
+
+    for page in range(start_page, end_page):
         url = f"{base_url}{separator}pn={page}"
         try:
             wait_time = random.uniform(p_min, p_max)
@@ -65,7 +69,8 @@ def scrape_suumo_list_incremental(base_url, max_pages, p_min, p_max, d_min, d_ma
             
             res = session.get(url, headers=headers, timeout=15)
             if res.status_code == 403:
-                st.session_state['scraping_log'] = f"❌ {page}ページ目の一覧表示でSUUMOのブロック(403)を検知しました。ここまでのデータを保存して終了します。"
+                # 💡 中断時のナビゲーションを強化
+                st.session_state['scraping_log'] = f"❌ {page}ページ目の一覧表示でSUUMOのブロック(403)を検知しました。\n\n✅ 【{page-1}ページ目】までのデータは無事保存されています！\n👉 次回は「開始ページ」を【 {page} 】に設定して再開してください。"
                 break
                 
             res.raise_for_status() 
@@ -143,11 +148,12 @@ def scrape_suumo_list_incremental(base_url, max_pages, p_min, p_max, d_min, d_ma
                             d_res = session.get(full_url, headers=headers, timeout=10)
                             
                             if d_res.status_code == 403:
-                                st.session_state['scraping_log'] = f"❌ {page}ページ目（{title}）の詳細取得中にブロックされました。ここまでのデータを保存します。"
+                                # 💡 詳細ページで止まった場合のナビゲーション
+                                st.session_state['scraping_log'] = f"❌ {page}ページ目（{title}）の詳細取得中にブロックされました。\n\n✅ 【{page}ページ目の途中】までのデータは無事保存されています！\n👉 取得済みの重複データは自動で弾かれるため、次回は「開始ページ」を【 {page} 】に設定して再開してください。"
                                 temp_df = pd.DataFrame(new_data)
                                 if not temp_df.empty:
                                     st.session_state['raw_df'] = pd.concat([st.session_state['raw_df'], temp_df]).drop_duplicates(subset=['物件名', '家賃', '共益費', '間取り', '専有面積', '階建'], keep='first')
-                                return # ここで完全に強制終了
+                                return 
                                 
                             d_tree = lxml.html.fromstring(d_res.content)
                             
@@ -220,23 +226,24 @@ def scrape_suumo_list_incremental(base_url, max_pages, p_min, p_max, d_min, d_ma
                         "URL": full_url
                     })
             
-            # 💡 1ページ終わるごとにAIの記憶(session)にセーブし、重複を削除
             temp_df = pd.DataFrame(new_data)
             if not temp_df.empty:
                 st.session_state['raw_df'] = pd.concat([st.session_state['raw_df'], temp_df]).drop_duplicates(subset=['物件名', '家賃', '共益費', '間取り', '専有面積', '階建'], keep='first')
-            new_data = [] # リセットして次のページへ
+            new_data = [] 
             
-            progress_bar.progress(page / max_pages)
+            current_progress += 1
+            progress_bar.progress(current_progress / max_pages)
                 
         except requests.exceptions.Timeout:
-            st.session_state['scraping_log'] = f"❌ {page}ページ目で通信タイムアウトが発生しました。ここまでのデータを保存します。"
+            st.session_state['scraping_log'] = f"❌ {page}ページ目で通信タイムアウトが発生しました。\n✅ ここまでのデータは保存済みです。次回は開始ページを【 {page} 】に設定してください。"
             break
         except Exception as e:
-            st.session_state['scraping_log'] = f"⚠️ 予期せぬエラー({str(e)})が発生しました。ここまでのデータを保存します。"
+            st.session_state['scraping_log'] = f"⚠️ 予期せぬエラー({str(e)})が発生しました。\n✅ データは保存済みです。次回は開始ページを【 {page} 】に設定してください。"
             break
             
-    if not st.session_state['scraping_log']:
-        st.session_state['scraping_log'] = "✅ 指定された全ページの処理が完了しました。"
+    # エラーで上書きされていなければ完了メッセージ
+    if not st.session_state['scraping_log'] or ("❌" not in st.session_state['scraping_log'] and "⚠️" not in st.session_state['scraping_log']):
+        st.session_state['scraping_log'] = f"✅ 指定された {start_page} ページ 〜 {end_page - 1} ページの処理がすべて完了しました！"
         
     status_text.empty()
     progress_bar.empty()
@@ -340,19 +347,24 @@ def analyze_real_estate_data_final(raw_df, rules_file):
 tab1, tab2, tab3 = st.tabs(["📂 ①データの取得＆解析", "🤖 ②詳細査定シミュレーター", "🏘️ ③エリア別相場ヒートマップ"])
 
 # ---------------------------------------------------------
-# TAB 1: アップロード / スクレイピング画面 (完全復旧版)
+# TAB 1: アップロード / スクレイピング画面
 # ---------------------------------------------------------
 with tab1:
     st.write("「SUUMOから自動取得」または「お手元のExcelファイルアップロード」のどちらかを選択してください。")
     
-    # ▼ ラジオボタン復活！
     data_source = st.radio("データソースの選択", ["🌐 SUUMOのURLから自動取得 (スクレイピング)", "📁 エクセル/CSVファイルをアップロード"])
     
     df_raw = None
     
     if data_source == "🌐 SUUMOのURLから自動取得 (スクレイピング)":
         target_url = st.text_input("SUUMOの検索結果URLを貼り付けてください", placeholder="https://suumo.jp/jj/chintai/ichiran/...")
-        max_pages = st.number_input("取得する最大ページ数", min_value=1, max_value=100, value=3)
+        
+        # 💡 開始ページと取得ページ数を横並びに
+        col_p1, col_p2 = st.columns(2)
+        with col_p1:
+            start_page = st.number_input("スクレイピング開始ページ（中断した場合はここを変更）", min_value=1, max_value=999, value=1)
+        with col_p2:
+            max_pages = st.number_input("取得するページ数（開始ページから何ページ分か）", min_value=1, max_value=100, value=3)
         
         with st.expander("⚙️ スクレイピング待機時間の設定（ブロック対策）", expanded=False):
             col_w1, col_w2 = st.columns(2)
@@ -368,22 +380,22 @@ with tab1:
             p_min_actual, p_max_actual = min(p_min, p_max), max(p_min, p_max)
             d_min_actual, d_max_actual = min(d_min, d_max), max(d_min, d_max)
 
-        # 💡 ボタンとレスキューダウンロードを横並びに配置
         col_btn, col_res = st.columns([1, 1])
         
         with col_btn:
             if st.button("🚀 データを取得する"):
                 if target_url:
-                    # 開始時にログとデータをリセット
-                    st.session_state['raw_df'] = pd.DataFrame()
+                    # 💡 開始ページが「1」の時だけデータをリセット。途中から再開する場合は前回のデータに継ぎ足す。
+                    if start_page == 1:
+                        st.session_state['raw_df'] = pd.DataFrame()
+                        
                     st.session_state['scraping_log'] = ""
                     with st.spinner("SUUMOから全物件の詳細データを自動収集しています..."):
-                        scrape_suumo_list_incremental(target_url, max_pages, p_min_actual, p_max_actual, d_min_actual, d_max_actual)
+                        scrape_suumo_list_incremental(target_url, start_page, max_pages, p_min_actual, p_max_actual, d_min_actual, d_max_actual)
                 else:
                     st.warning("URLを入力してください。")
 
         with col_res:
-            # 💡 常設のレスキューダウンロードボタン
             if 'raw_df' in st.session_state and not st.session_state['raw_df'].empty:
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
@@ -395,7 +407,6 @@ with tab1:
                     mime="application/vnd.ms-excel"
                 )
 
-        # ログの表示
         if 'scraping_log' in st.session_state and st.session_state['scraping_log']:
             if "❌" in st.session_state['scraping_log'] or "⚠️" in st.session_state['scraping_log']:
                 st.warning(st.session_state['scraping_log'])
@@ -408,7 +419,6 @@ with tab1:
             df_raw = st.session_state['raw_df']
 
     else:
-        # ▼ ファイルアップロード画面復活！
         uploaded_suumo = st.file_uploader("SUUMO物件データ (Excel/CSV)", type=["xlsx", "csv"])
         if uploaded_suumo:
             try:
@@ -418,7 +428,6 @@ with tab1:
             st.success("✅ ファイルを読み込みました！")
 
     st.markdown("---")
-    # ▼ ルールCSVのアップロード画面復活！
     st.write("▼ 共通: ルールCSVをアップロードして解析を実行してください")
     uploaded_rules = st.file_uploader("ルールフォーマット (CSV) ※必須", type=["csv"])
 
