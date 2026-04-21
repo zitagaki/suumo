@@ -620,7 +620,7 @@ with tab2:
             st.info("条件に一致するデータがないため、相場分布のメーターは表示されません。")
 
 # ---------------------------------------------------------
-# TAB 3: マップ・単価分析画面 (UI統一・表示維持版)
+# TAB 3: マップ・単価分析画面 (UI統一・表示維持版・日本の住所対応)
 # ---------------------------------------------------------
 with tab3:
     if 'df_suumo' not in st.session_state:
@@ -631,7 +631,6 @@ with tab3:
         
         df = st.session_state['df_suumo']
         
-        # 💡 シミュレーターと全く同じUIデザインを実装
         st.markdown("**▼ 基本スペックでの絞り込み**")
         col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
         
@@ -681,7 +680,6 @@ with tab3:
         if m_2f:
             filtered_df = filtered_df[~filtered_df['階建'].str.match(r'^1階/|^1階$|地下', na=False)]
             
-        # 設備キーワードの絞り込み
         if m_corner: filtered_df = filtered_df[filtered_df['設備'].str.contains('角住戸|角部屋', na=False) | filtered_df['備考'].str.contains('角住戸|角部屋', na=False)]
         if m_south: filtered_df = filtered_df[filtered_df['設備'].str.contains('南向き', na=False) | filtered_df['備考'].str.contains('南向き', na=False)]
         if m_bt: filtered_df = filtered_df[filtered_df['設備'].str.contains('バストイレ別|バス・トイレ別', na=False)]
@@ -700,20 +698,34 @@ with tab3:
             st.warning("※件数が多すぎるため、変換負荷を考慮して上位50件のみをマップに表示します。さらに条件を絞り込むことをお勧めします。")
             filtered_df = filtered_df.head(50)
 
-        # 💡 地図の描画ボタン（押した時にセッションに保存する）
         if st.button("🗺️ 絞り込んだ条件でマップを更新・描画する"):
             with st.spinner("住所を座標に変換しています...少々お待ちください。"):
-                geolocator = Nominatim(user_agent="suumo_real_estate_analyzer")
+                geolocator = Nominatim(user_agent="suumo_real_estate_analyzer_v2")
                 geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1.0)
                 
-                filtered_df['location'] = filtered_df['住所'].apply(geocode)
+                # 💡【対策1】無料の地図システムは「〇丁目〇番地」などの日本の細かい住所が苦手なため、
+                # 正規表現を使って住所の末尾にある数字（〇丁目など）をカットし、町名までに補正して検索させる
+                def clean_address(addr):
+                    return re.sub(r'[\d０-９\-ー]+.*$', '', str(addr))
+                
+                filtered_df['検索用住所'] = filtered_df['住所'].apply(clean_address)
+                filtered_df['location'] = filtered_df['検索用住所'].apply(geocode)
+                
                 filtered_df['緯度'] = filtered_df['location'].apply(lambda loc: loc.latitude if loc else None)
                 filtered_df['経度'] = filtered_df['location'].apply(lambda loc: loc.longitude if loc else None)
                 
-                # 変換成功したデータをAIの記憶（session_state）に保存
+                # 💡【対策2】同じ町名の物件はピンが全く同じ場所に配置されてしまい重なって見えなくなるため、
+                # 乱数を使ってピンの位置をわずかに（数十メートルほど）バラバラに散らすジッター処理
+                def add_jitter(val):
+                    if pd.notna(val):
+                        return val + random.uniform(-0.0015, 0.0015)
+                    return val
+                    
+                filtered_df['緯度'] = filtered_df['緯度'].apply(add_jitter)
+                filtered_df['経度'] = filtered_df['経度'].apply(add_jitter)
+                
                 st.session_state['map_df'] = filtered_df.dropna(subset=['緯度', '経度'])
                 
-        # 💡 AIの記憶の中に地図データがあれば、何度でも表示し続ける（ピンをクリックしても消えない）
         if 'map_df' in st.session_state and not st.session_state['map_df'].empty:
             map_df = st.session_state['map_df']
             st.success(f"✅ {len(map_df)} 件の物件をマップに配置しました！（※条件を変えた場合は再度ボタンを押してください）")
@@ -747,5 +759,6 @@ with tab3:
                     icon=folium.Icon(color=pin_color, icon="home"),
                 ).add_to(m)
             
-            # 地図を表示
             st_folium(m, width=900, height=600)
+        elif 'map_df' in st.session_state and st.session_state['map_df'].empty:
+            st.error("住所の座標変換に失敗しました。取得した住所データの形式が特殊な可能性があります。")
