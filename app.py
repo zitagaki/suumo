@@ -621,11 +621,10 @@ with tab3:
         st.warning("⚠️ 先に「①データの取得＆解析」タブでデータを取り込んでください。")
     else:
         st.subheader("🏘️ エリア（町丁目）別 相場ヒートマップ＆物件リスト")
-        st.write("「下高井戸１」などの住所（町丁目）ごとにデータを自動でグループ化し、相場水準を色分けしてリスト化します。")
+        st.write("「下高井戸１」などの住所（町丁目）ごとにデータを自動でグループ化し、相場水準をリスト化します。")
         
         df = st.session_state['df_suumo']
         
-        # ▼ 基本スペックでの絞り込み
         st.markdown("**▼ データの絞り込み条件**")
         col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
         
@@ -639,7 +638,6 @@ with tab3:
         with col_m4: map_max_age = st.number_input("築年数の上限 (年)", min_value=0, max_value=100, value=30)
         with col_m5: map_max_walk = st.number_input("駅徒歩の上限 (分)", min_value=0, max_value=60, value=15)
 
-        # ▼ 建物種別 ＆ 設備条件での絞り込み
         map_btype = st.radio("建物種別 (集計用)", ["指定なし", "マンション", "アパート"], horizontal=True)
         
         with st.expander("➕ 詳細な設備条件で絞り込む"):
@@ -661,7 +659,6 @@ with tab3:
                 m_auto = st.checkbox("オートロック", value=False, key='mauto')
                 m_box = st.checkbox("宅配ボックス", value=False, key='mbox')
 
-        # --- フィルタリング実行 ---
         filtered_df = df[
             (df['間取りグループ'].isin(map_layouts)) &
             (df['専有面積_m2'] >= map_min_area) &
@@ -687,42 +684,48 @@ with tab3:
         st.info(f"💡 条件に一致する物件: {len(filtered_df)} 件")
         
         if not filtered_df.empty:
-            st.markdown("### 📊 町丁目エリア別の平均相場（色分けリスト）")
-            st.write("※「平均㎡単価」が高い（割高な）エリアほど赤く、低い（割安な）エリアほど青く自動で色付けされます。表の見出しをクリックすると並び替えができます。")
+            st.markdown("### 📊 町丁目エリア別の平均相場リスト")
             
-            # 💡 エリア（住所）ごとの自動集計エンジン（特殊記号「㎡」を避けて計算）
             area_stats = filtered_df.groupby('住所').agg(
                 物件数=('物件名', 'count'),
                 平均総家賃_万円=('総家賃', lambda x: x.mean() / 10000),
-                平均平米単価_円=('㎡単価_総家賃', 'mean'),  # ← ここを「平米」に変更してエラー回避
+                平均平米単価_円=('㎡単価_総家賃', 'mean'),
                 平均専有面積_m2=('専有面積_m2', 'mean'),
                 平均築年数_年=('築年', 'mean'),
                 平均駅徒歩_分=('徒歩分数', 'mean')
             ).reset_index()
             
-            # 💡 計算が終わった後に、表の見た目用に列名を「㎡」に戻す
             area_stats = area_stats.rename(columns={'平均平米単価_円': '平均㎡単価_円'})
-            
-            # ㎡単価で降順に並び替え
             area_stats = area_stats.sort_values('平均㎡単価_円', ascending=False)
             
-            # 💡 色付き（ヒートマップ）のデータフレームを生成
-            styled_stats = area_stats.style.background_gradient(
-                cmap='coolwarm', # 青〜赤のグラデーション
-                subset=['平均㎡単価_円']
-            ).format({
-                "平均総家賃_万円": "{:.1f}",
-                "平均㎡単価_円": "{:,.0f}",
-                "平均専有面積_m2": "{:.1f}",
-                "平均築年数_年": "{:.1f}",
-                "平均駅徒歩_分": "{:.1f}"
-            })
-            
-            # 表を表示（画面幅に合わせる）
+            # 💡 エラー回避：matplotlibがなくても表を表示させる安全装置
+            try:
+                styled_stats = area_stats.style.background_gradient(
+                    cmap='coolwarm',
+                    subset=['平均㎡単価_円']
+                ).format({
+                    "平均総家賃_万円": "{:.1f}",
+                    "平均㎡単価_円": "{:,.0f}",
+                    "平均専有面積_m2": "{:.1f}",
+                    "平均築年数_年": "{:.1f}",
+                    "平均駅徒歩_分": "{:.1f}"
+                })
+                st.write("※「平均㎡単価」が高い（割高な）エリアほど赤く、低い（割安な）エリアほど青く自動で色付けされます。")
+                st.dataframe(styled_stats, use_container_width=True, height=400)
+            except ImportError:
+                st.warning("※ サーバーに色付け機能が未搭載のため、標準の表（色なし）で表示しています。")
+                styled_stats = area_stats.style.format({
+                    "平均総家賃_万円": "{:.1f}",
+                    "平均㎡単価_円": "{:,.0f}",
+                    "平均専有面積_m2": "{:.1f}",
+                    "平均築年数_年": "{:.1f}",
+                    "平均駅徒歩_分": "{:.1f}"
+                })
+                st.dataframe(styled_stats, use_container_width=True, height=400)
+
             st.markdown("<br><hr>", unsafe_allow_html=True)
             st.markdown("### 📋 指定エリアの物件詳細リスト")
             
-            # 💡 選んだエリアの物件だけを下部にリスト表示する
             selected_area_for_list = st.selectbox("詳細を確認したい町丁目を選択してください", ['すべて表示'] + list(area_stats['住所']))
             
             if selected_area_for_list == 'すべて表示':
@@ -730,7 +733,7 @@ with tab3:
             else:
                 display_df = filtered_df[filtered_df['住所'] == selected_area_for_list].copy()
             
-            # 💡 エラー回避：読み込んだデータに存在する列だけを抽出する
+            # 💡 エラー回避：存在する列だけでリストを作成する安全装置
             display_cols = ['物件名', '住所', '間取り', '専有面積_m2', '総家賃', '㎡単価_総家賃', '階建', '築年', '徒歩分数', 'URL']
             valid_cols = [c for c in display_cols if c in display_df.columns]
             
@@ -741,13 +744,11 @@ with tab3:
             if '㎡単価_総家賃' in display_df.columns:
                 display_df['㎡単価(円)'] = display_df['㎡単価_総家賃'].astype(int).apply(lambda x: f"{x:,}")
             
-            # 最終的な表示用の列もチェック
             final_cols = ['物件名', '住所', '間取り', '専有面積_m2', '総家賃(万円)', '㎡単価(円)', '階建', '築年', '徒歩分数', 'URL']
             valid_final_cols = [c for c in final_cols if c in display_df.columns]
             
             display_df_clean = display_df[valid_final_cols]
             
-            # URL列が存在する場合のみリンク化する設定
             col_config = {}
             if "URL" in valid_final_cols:
                 col_config["URL"] = st.column_config.LinkColumn("物件リンク")
