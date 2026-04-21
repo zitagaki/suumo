@@ -351,7 +351,6 @@ def analyze_real_estate_data_v18(raw_df, rules_file):
 # =========================================================
 # 4. UIロジック
 # =========================================================
-# 💡 タブの名前を「マップ」から「エリア別相場リスト」へ変更
 tab1, tab2, tab3 = st.tabs(["📂 ①データの取得＆解析", "🤖 ②詳細査定シミュレーター", "🏘️ ③エリア別相場ヒートマップ"])
 
 # ---------------------------------------------------------
@@ -625,6 +624,11 @@ with tab3:
         
         df = st.session_state['df_suumo']
         
+        # 💡 ここで計算基準を選択できるように追加
+        calc_mode_map = st.radio("💰 単価計算の基準（ヒートマップ用）", ["家賃＋共益費（総家賃）で計算", "家賃のみで計算"], horizontal=True, key="map_calc_mode")
+        rent_col_map = '総家賃' if calc_mode_map == "家賃＋共益費（総家賃）で計算" else '家賃_円'
+        tanka_col_map = '㎡単価_総家賃' if calc_mode_map == "家賃＋共益費（総家賃）で計算" else '㎡単価_家賃のみ'
+        
         st.markdown("**▼ データの絞り込み条件**")
         col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
         
@@ -686,10 +690,11 @@ with tab3:
         if not filtered_df.empty:
             st.markdown("### 📊 町丁目エリア別の平均相場リスト")
             
+            # 💡 選択された基準で集計を行う
             area_stats = filtered_df.groupby('住所').agg(
                 物件数=('物件名', 'count'),
-                平均総家賃_万円=('総家賃', lambda x: x.mean() / 10000),
-                平均平米単価_円=('㎡単価_総家賃', 'mean'),
+                平均価格_万円=(rent_col_map, lambda x: x.mean() / 10000),
+                平均平米単価_円=(tanka_col_map, 'mean'),
                 平均専有面積_m2=('専有面積_m2', 'mean'),
                 平均築年数_年=('築年', 'mean'),
                 平均駅徒歩_分=('徒歩分数', 'mean')
@@ -698,13 +703,12 @@ with tab3:
             area_stats = area_stats.rename(columns={'平均平米単価_円': '平均㎡単価_円'})
             area_stats = area_stats.sort_values('平均㎡単価_円', ascending=False)
             
-            # 💡 エラー回避：matplotlibがなくても表を表示させる安全装置
             try:
                 styled_stats = area_stats.style.background_gradient(
                     cmap='coolwarm',
                     subset=['平均㎡単価_円']
                 ).format({
-                    "平均総家賃_万円": "{:.1f}",
+                    "平均価格_万円": "{:.1f}",
                     "平均㎡単価_円": "{:,.0f}",
                     "平均専有面積_m2": "{:.1f}",
                     "平均築年数_年": "{:.1f}",
@@ -713,9 +717,9 @@ with tab3:
                 st.write("※「平均㎡単価」が高い（割高な）エリアほど赤く、低い（割安な）エリアほど青く自動で色付けされます。")
                 st.dataframe(styled_stats, use_container_width=True, height=400)
             except ImportError:
-                st.warning("※ サーバーに色付け機能が未搭載のため、標準の表（色なし）で表示しています。")
+                st.warning("※ サーバーに色付け機能が未搭載のため、標準の表（色なし）で表示しています。色を付けるには requirements.txt に matplotlib を追加してください。")
                 styled_stats = area_stats.style.format({
-                    "平均総家賃_万円": "{:.1f}",
+                    "平均価格_万円": "{:.1f}",
                     "平均㎡単価_円": "{:,.0f}",
                     "平均専有面積_m2": "{:.1f}",
                     "平均築年数_年": "{:.1f}",
@@ -733,18 +737,20 @@ with tab3:
             else:
                 display_df = filtered_df[filtered_df['住所'] == selected_area_for_list].copy()
             
-            # 💡 エラー回避：存在する列だけでリストを作成する安全装置
-            display_cols = ['物件名', '住所', '間取り', '専有面積_m2', '総家賃', '㎡単価_総家賃', '階建', '築年', '徒歩分数', 'URL']
+            # 💡 選択された基準でリストも再構成する
+            display_cols = ['物件名', '住所', '間取り', '専有面積_m2', rent_col_map, tanka_col_map, '階建', '築年', '徒歩分数', 'URL']
             valid_cols = [c for c in display_cols if c in display_df.columns]
             
-            display_df = display_df[valid_cols].sort_values('総家賃')
+            display_df = display_df[valid_cols].sort_values(rent_col_map)
             
-            if '総家賃' in display_df.columns:
-                display_df['総家賃(万円)'] = (display_df['総家賃'] / 10000).round(1)
-            if '㎡単価_総家賃' in display_df.columns:
-                display_df['㎡単価(円)'] = display_df['㎡単価_総家賃'].astype(int).apply(lambda x: f"{x:,}")
+            price_col_label = '総家賃(万円)' if rent_col_map == '総家賃' else '家賃(万円)'
             
-            final_cols = ['物件名', '住所', '間取り', '専有面積_m2', '総家賃(万円)', '㎡単価(円)', '階建', '築年', '徒歩分数', 'URL']
+            if rent_col_map in display_df.columns:
+                display_df[price_col_label] = (display_df[rent_col_map] / 10000).round(1)
+            if tanka_col_map in display_df.columns:
+                display_df['㎡単価(円)'] = display_df[tanka_col_map].astype(int).apply(lambda x: f"{x:,}")
+            
+            final_cols = ['物件名', '住所', '間取り', '専有面積_m2', price_col_label, '㎡単価(円)', '階建', '築年', '徒歩分数', 'URL']
             valid_final_cols = [c for c in final_cols if c in display_df.columns]
             
             display_df_clean = display_df[valid_final_cols]
