@@ -9,3 +9,6 @@ openpyxl
 scikit-learn
 beautifulsoup4
 requests
+folium
+streamlit-folium
+geopy

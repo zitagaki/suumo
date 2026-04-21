@@ -9,6 +9,12 @@ import random
 import streamlit as st
 import io
 
+# 💡 今回追加した地図と座標変換のパッケージ（これがないとエラーになります）
+import folium
+from streamlit_folium import st_folium
+from geopy.geocoders import Nominatim
+from geopy.extra.rate_limiter import RateLimiter
+
 # =========================================================
 # 1. ページ設定
 # =========================================================
@@ -36,7 +42,7 @@ def get_xpath_text(tree, xpath_str):
 
 def scrape_suumo_list(base_url, max_pages, p_min, p_max, d_min, d_max):
     all_data = []
-    error_msg = "" # 💡 どこでエラーが起きたかを記録する変数
+    error_msg = ""
     
     session = requests.Session()
     headers = {
@@ -68,7 +74,6 @@ def scrape_suumo_list(base_url, max_pages, p_min, p_max, d_min, d_max):
             
             res = session.get(url, headers=headers, timeout=15)
             
-            # 💡 一覧ページでのブロック(403)を検知して即座に安全停止
             if res.status_code == 403:
                 error_msg = f"一覧ページ（{page}ページ目）でSUUMOのアクセス制限（403 Forbidden）を検知しました。"
                 break
@@ -148,10 +153,9 @@ def scrape_suumo_list(base_url, max_pages, p_min, p_max, d_min, d_max):
                             time.sleep(random.uniform(d_min, d_max))
                             d_res = session.get(full_url, headers=headers, timeout=10)
                             
-                            # 💡 詳細ページでのブロック(403)を検知して即座に安全停止
                             if d_res.status_code == 403:
                                 error_msg = f"詳細ページの取得中（{page}ページ目）にSUUMOのアクセス制限（403 Forbidden）を検知しました。"
-                                break # 部屋ループを抜ける
+                                break 
                                 
                             d_tree = lxml.html.fromstring(d_res.content)
                             
@@ -177,7 +181,7 @@ def scrape_suumo_list(base_url, max_pages, p_min, p_max, d_min, d_max):
                                         detail_dict[k] = v
                                         
                         except requests.exceptions.Timeout:
-                            pass # 軽いタイムアウトは無視して次の部屋へ
+                            pass 
                         except Exception:
                             pass
 
@@ -224,7 +228,6 @@ def scrape_suumo_list(base_url, max_pages, p_min, p_max, d_min, d_max):
                         "URL": full_url
                     })
                 
-                # エラー検知時は外側のループも即座に抜ける
                 if error_msg:
                     break
             
@@ -232,7 +235,6 @@ def scrape_suumo_list(base_url, max_pages, p_min, p_max, d_min, d_max):
             if error_msg:
                 break
                 
-        # 💡 通信タイムアウトなどの致命的エラーもキャッチして安全停止
         except requests.exceptions.Timeout:
             error_msg = f"ページ {page} で通信タイムアウトが発生しました。SUUMOサーバーの応答が遅延しています。"
             break
@@ -257,14 +259,13 @@ def scrape_suumo_list(base_url, max_pages, p_min, p_max, d_min, d_max):
         if removed_count > 0:
             st.info(f"✨ 自動クレンジング: 複数会社から出稿されていた同一物件の重複を {removed_count} 件 削除しました。（実数: {after_count}件）")
             
-    # 💡 取得データとともに、エラー内容も返す
     return df, error_msg
 
 # =========================================================
 # 3. 前処理・データ読み込みエンジン
 # =========================================================
 @st.cache_data
-def analyze_real_estate_data_v14(raw_df, rules_file):
+def analyze_real_estate_data_v15(raw_df, rules_file):
     df_rules = pd.read_csv(rules_file)
     extracted_rules = {}
     madori_list = ['ワンルーム', '1K・1DK', '1LDK', '2K・2DK', '2LDK', '3K・3DK', '3LDK']
@@ -390,13 +391,10 @@ with tab1:
         if st.button("🚀 データを取得する"):
             if target_url:
                 with st.spinner("SUUMOから全物件の詳細データを自動収集しています（※設定した待機時間に応じて処理に時間がかかります）..."):
-                    # 💡 関数からデータとエラー内容の2つを受け取る
                     scraped_df, error_msg = scrape_suumo_list(target_url, max_pages, p_min_actual, p_max_actual, d_min_actual, d_max_actual)
                     
                     if not scraped_df.empty:
                         st.session_state['raw_df'] = scraped_df
-                        
-                        # 💡 エラーで中断された場合のレスキュー表示
                         if error_msg:
                             st.warning(f"⚠️ **取得中断のお知らせ**\n\n{error_msg}\n\nロボット対策による制限がかかりましたが、**そこまでに取得できた {len(scraped_df)} 件のデータ** は安全に保存されました！下のボタンからダウンロード・解析へ進めます。")
                         else:
@@ -435,12 +433,12 @@ with tab1:
     if df_raw is not None and uploaded_rules is not None:
         if st.button("🧠 解析してシミュレーターを起動"):
             with st.spinner("データを解析し、駅ごとの相場とルールを構築しています..."):
-                extracted_rules, df_suumo = analyze_real_estate_data_v14(df_raw, uploaded_rules)
+                extracted_rules, df_suumo = analyze_real_estate_data_v15(df_raw, uploaded_rules)
                 
                 st.session_state['rules'] = extracted_rules
                 st.session_state['df_suumo'] = df_suumo
                 
-                st.success("✅ 解析完了！「②詳細査定シミュレーター」タブへお進みください。")
+                st.success("✅ 解析完了！「②詳細査定シミュレーター」や「③マップ・㎡単価分析」タブへお進みください。")
 
 # ---------------------------------------------------------
 # TAB 2: シミュレーター画面
@@ -501,7 +499,6 @@ with tab2:
             'オートロック': i_auto, '宅配ボックス': i_box
         }
 
-        # ベース相場の取得
         mask_base = (df_suumo['間取りグループ'] == target_layout)
         if selected_station != '指定なし': mask_base &= (df_suumo['駅名'] == selected_station)
         if i_btype == 'マンション': mask_base &= df_suumo['建物種別_判定用'].str.contains('マンション', na=False)
@@ -524,7 +521,6 @@ with tab2:
                 if pd.isna(tanka_base): tanka_base = 4000
                 st.warning(f"⚠️ {i_btype}のデータが見つからないため、全体の相場を使用しています。")
 
-        # 計算ロジック
         r = rules.get(target_layout, {})
         rent_base = tanka_base * i_area
         rent_rules = 0
@@ -552,7 +548,6 @@ with tab2:
         
         predicted_rent = int(rent_base + rent_rules + i_premium)
 
-        # 画面下部統計
         station_label = "当該エリア全体" if selected_station == '指定なし' else f"{selected_station}駅周辺"
         if i_btype != '指定なし': station_label += f"（{i_btype}）"
             
@@ -572,7 +567,6 @@ with tab2:
         else:
             price_min = price_max = zone_low = zone_high = 0
 
-        # 結果表示
         st.markdown(
             f"""
             <div style="background-color:#e8f4f8;padding:20px;border-radius:10px;text-align:center;margin-top:20px;">
@@ -631,6 +625,7 @@ with tab2:
                 
         else:
             st.info("条件に一致するデータがないため、相場分布のメーターは表示されません。")
+
 # ---------------------------------------------------------
 # TAB 3: マップ・単価分析画面
 # ---------------------------------------------------------
@@ -643,7 +638,6 @@ with tab3:
         
         df = st.session_state['df_suumo']
         
-        # --- 絞り込みUI ---
         st.markdown("**▼ マップに表示する物件の絞り込み**")
         col_m1, col_m2, col_m3, col_m4 = st.columns(4)
         
@@ -657,7 +651,6 @@ with tab3:
         with col_m4:
             map_max_age = st.number_input("築年数の上限 (年)", value=30, step=1)
 
-        # データフィルタリング
         filtered_df = df[
             (df['間取りグループ'].isin(map_layout)) &
             (df['総家賃'] <= map_max_rent * 10000) &
@@ -671,39 +664,29 @@ with tab3:
             st.warning("※件数が多すぎるため、変換負荷を考慮して上位50件のみをマップに表示します。さらに条件を絞り込むことをお勧めします。")
             filtered_df = filtered_df.head(50)
 
-        # --- マップ描画ボタン ---
         if st.button("🗺️ マップを描画する (※住所の座標変換に数十秒かかります)"):
             with st.spinner(f"{len(filtered_df)}件の住所を座標に変換しています...少々お待ちください。"):
                 
-                # ジオコーディングの設定 (無料のOpenStreetMapを使用)
                 geolocator = Nominatim(user_agent="suumo_real_estate_analyzer")
-                # サーバー負荷対策：1秒に1回のアクセスに制限
                 geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1.0)
                 
-                # 住所から緯度経度を取得（「東京都杉並区～」などの文字列を座標に）
                 filtered_df['location'] = filtered_df['住所'].apply(geocode)
                 filtered_df['緯度'] = filtered_df['location'].apply(lambda loc: loc.latitude if loc else None)
                 filtered_df['経度'] = filtered_df['location'].apply(lambda loc: loc.longitude if loc else None)
                 
-                # 座標が取得できた物件のみ抽出
                 map_df = filtered_df.dropna(subset=['緯度', '経度'])
                 
                 if not map_df.empty:
                     st.success(f"✅ {len(map_df)} 件の物件をマップに配置しました！")
                     
-                    # 地図の中心点を計算（取得した物件の平均座標）
                     center_lat = map_df['緯度'].mean()
                     center_lon = map_df['経度'].mean()
                     
-                    # 地図の初期化 (Folium)
                     m = folium.Map(location=[center_lat, center_lon], zoom_start=15)
                     
-                    # 各物件にピンを刺す
                     for idx, row in map_df.iterrows():
-                        # ㎡単価の計算（坪単価に応用も可能）
                         tanka_m2 = row['㎡単価_総家賃']
                         
-                        # ピンをクリックした時に出るポップアップ（HTMLで装飾）
                         popup_html = f"""
                         <div style="width:200px;">
                             <h4 style="margin:0; color:#0066cc;">{row['物件名']}</h4>
@@ -717,8 +700,6 @@ with tab3:
                         </div>
                         """
                         
-                        # ㎡単価の高さに応じてピンの色を変える（直感的な割安・割高の把握）
-                        # ※ここでは仮の基準値として、4000円以上を赤、それ以外を青にしています
                         pin_color = "red" if tanka_m2 >= 4000 else "blue"
                         
                         folium.Marker(
@@ -727,7 +708,6 @@ with tab3:
                             icon=folium.Icon(color=pin_color, icon="home"),
                         ).add_to(m)
                     
-                    # Streamlit上でマップを表示
                     st_folium(m, width=900, height=600)
                 else:
                     st.error("住所の座標変換に失敗しました。取得した住所データの形式が特殊な可能性があります。")
