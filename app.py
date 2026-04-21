@@ -22,7 +22,7 @@ if 'scraping_log' not in st.session_state:
 st.title("🏡 不動産ハイブリッド査定システム (AI × プロの相場観)")
 
 # =========================================================
-# 2. スクレイピングエンジン (リアルタイム現在地トラッカー搭載)
+# 2. スクレイピングエンジン
 # =========================================================
 def get_xpath_text(tree, xpath_str):
     try:
@@ -52,7 +52,6 @@ def scrape_suumo_list_incremental(base_url, start_page, max_pages, p_min, p_max,
     base_url = re.sub(r'&page=\d+', '', base_url)
     separator = '&' if '?' in base_url else '?'
     
-    # 💡 リアルタイムトラッカー用の大きな枠を用意
     tracker_box = st.empty()
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -62,8 +61,10 @@ def scrape_suumo_list_incremental(base_url, start_page, max_pages, p_min, p_max,
     current_progress = 0
 
     for page in range(start_page, end_page):
-        # 💡 通信を行う【前】に、画面にデカデカと現在のページを表示する
-        tracker_box.info(f"🔄 **現在【 {page} 】ページ目を処理しています...**\n\n※もしここで突然画面が止まったり、フリーズした場合は、この「{page}」ページ目で中断しています。次回は開始ページを「{page}」にして再開してください！")
+        # 💡 【重要】強制クラッシュ対策：通信を行う前に「記憶」に現在ページを刻み込む
+        st.session_state['scraping_log'] = f"⚠️ 【中断検知】前回の取得は【 {page} 】ページ目の途中で通信が強制切断（リセット）されました。\n✅ そこまでのデータは無事保存されています！次回は開始ページを「{page}」に設定して再開してください。"
+        
+        tracker_box.info(f"🔄 **現在【 {page} 】ページ目を処理しています...**\n\n※もしここで突然画面が初期状態に戻った場合は、裏で強制切断が起きています。次回は開始ページを「{page}」にして再開してください！")
         
         url = f"{base_url}{separator}pn={page}"
         try:
@@ -73,7 +74,8 @@ def scrape_suumo_list_incremental(base_url, start_page, max_pages, p_min, p_max,
             
             res = session.get(url, headers=headers, timeout=15)
             if res.status_code == 403:
-                tracker_box.error(f"❌ 【 {page} 】ページ目でSUUMOのブロック(403)を検知しました！\n✅ 【{page-1}ページ目】までのデータは無事保存されています。次回は「開始ページ」を【 {page} 】に設定して再開してください。")
+                st.session_state['scraping_log'] = f"❌ 【 {page} 】ページ目でSUUMOのブロック(403)を検知しました！\n✅ 【{page-1}ページ目】までのデータは無事保存されています。次回は「開始ページ」を【 {page} 】に設定して再開してください。"
+                tracker_box.error(st.session_state['scraping_log'])
                 break
                 
             res.raise_for_status() 
@@ -82,7 +84,8 @@ def scrape_suumo_list_incremental(base_url, start_page, max_pages, p_min, p_max,
             items = soup.find_all("div", class_="cassetteitem")
             
             if not items:
-                tracker_box.warning(f"⚠️ {page}ページ目からデータが見つかりませんでした（最終ページの可能性があります）。")
+                st.session_state['scraping_log'] = f"⚠️ {page}ページ目からデータが見つかりませんでした（最終ページの可能性があります）。"
+                tracker_box.warning(st.session_state['scraping_log'])
                 break
                 
             total_rooms = sum([len(item.find_all("tbody")) for item in items])
@@ -151,7 +154,8 @@ def scrape_suumo_list_incremental(base_url, start_page, max_pages, p_min, p_max,
                             d_res = session.get(full_url, headers=headers, timeout=10)
                             
                             if d_res.status_code == 403:
-                                tracker_box.error(f"❌ 【 {page} 】ページ目の物件詳細取得中にブロックされました！\n✅ このページの途中までのデータは保存されています。次回は開始ページを【 {page} 】に設定して再開してください。")
+                                st.session_state['scraping_log'] = f"❌ 【 {page} 】ページ目の物件詳細取得中にブロックされました！\n✅ このページの途中までのデータは保存されています。次回は開始ページを【 {page} 】に設定して再開してください。"
+                                tracker_box.error(st.session_state['scraping_log'])
                                 temp_df = pd.DataFrame(new_data)
                                 if not temp_df.empty:
                                     st.session_state['raw_df'] = pd.concat([st.session_state['raw_df'], temp_df]).drop_duplicates(subset=['物件名', '家賃', '共益費', '間取り', '専有面積', '階建'], keep='first')
@@ -237,15 +241,18 @@ def scrape_suumo_list_incremental(base_url, start_page, max_pages, p_min, p_max,
             progress_bar.progress(current_progress / max_pages)
                 
         except requests.exceptions.Timeout:
-            tracker_box.error(f"❌ 【 {page} 】ページ目で通信タイムアウトが発生しました。\n✅ ここまでのデータは保存済みです。次回は開始ページを【 {page} 】に設定してください。")
+            st.session_state['scraping_log'] = f"❌ 【 {page} 】ページ目で通信タイムアウトが発生しました。\n✅ ここまでのデータは保存済みです。次回は開始ページを【 {page} 】に設定してください。"
+            tracker_box.error(st.session_state['scraping_log'])
             break
         except Exception as e:
-            tracker_box.error(f"⚠️ 予期せぬエラーが発生しました。\n✅ ここまでのデータは保存済みです。次回は開始ページを【 {page} 】に設定してください。")
+            st.session_state['scraping_log'] = f"⚠️ 予期せぬエラーが発生しました。\n✅ ここまでのデータは保存済みです。次回は開始ページを【 {page} 】に設定してください。"
+            tracker_box.error(st.session_state['scraping_log'])
             break
             
-    # 最後まで無事に完走した場合のみ、トラッカーの文字を「完了」に書き換える
-    else:
-        tracker_box.success(f"✅ 指定された {start_page} ページ 〜 {end_page - 1} ページの処理がすべて完了しました！")
+    # 全て無事に終わった場合のみ、完了メッセージで「記憶（セッション）」を上書きする
+    if not st.session_state['scraping_log'] or ("⚠️ 【中断検知】" in st.session_state['scraping_log']):
+        st.session_state['scraping_log'] = f"✅ 指定された {start_page} ページ 〜 {end_page - 1} ページの処理がすべて完了しました！"
+        tracker_box.success(st.session_state['scraping_log'])
         
     status_text.empty()
     progress_bar.empty()
@@ -406,6 +413,13 @@ with tab1:
                     file_name="suumo_rescue_data.xlsx",
                     mime="application/vnd.ms-excel"
                 )
+
+        # 💡 クラッシュからの復旧時でも、常に最新のログ（何ページ目で止まったか）を表示する
+        if 'scraping_log' in st.session_state and st.session_state['scraping_log']:
+            if "❌" in st.session_state['scraping_log'] or "⚠️" in st.session_state['scraping_log']:
+                st.warning(st.session_state['scraping_log'])
+            else:
+                st.success(st.session_state['scraping_log'])
 
         if 'raw_df' in st.session_state and not st.session_state['raw_df'].empty:
             st.write("取得したデータプレビュー:")
