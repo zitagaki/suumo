@@ -8,10 +8,6 @@ import time
 import random
 import streamlit as st
 import io
-import folium
-from streamlit_folium import st_folium
-from geopy.geocoders import Nominatim
-from geopy.extra.rate_limiter import RateLimiter
 
 # =========================================================
 # 1. ページ設定
@@ -263,7 +259,7 @@ def scrape_suumo_list(base_url, max_pages, p_min, p_max, d_min, d_max):
 # 3. 前処理・データ読み込みエンジン
 # =========================================================
 @st.cache_data
-def analyze_real_estate_data_v17(raw_df, rules_file):
+def analyze_real_estate_data_v18(raw_df, rules_file):
     df_rules = pd.read_csv(rules_file)
     extracted_rules = {}
     madori_list = ['ワンルーム', '1K・1DK', '1LDK', '2K・2DK', '2LDK', '3K・3DK', '3LDK']
@@ -355,7 +351,8 @@ def analyze_real_estate_data_v17(raw_df, rules_file):
 # =========================================================
 # 4. UIロジック
 # =========================================================
-tab1, tab2, tab3 = st.tabs(["📂 ①データの取得＆解析", "🤖 ②詳細査定シミュレーター", "🗺️ ③マップ・㎡単価分析"])
+# 💡 タブの名前を「マップ」から「エリア別相場リスト」へ変更
+tab1, tab2, tab3 = st.tabs(["📂 ①データの取得＆解析", "🤖 ②詳細査定シミュレーター", "🏘️ ③エリア別相場ヒートマップ"])
 
 # ---------------------------------------------------------
 # TAB 1: アップロード / スクレイピング画面
@@ -427,14 +424,12 @@ with tab1:
     if df_raw is not None and uploaded_rules is not None:
         if st.button("🧠 解析してシミュレーターを起動"):
             with st.spinner("データを解析し、駅ごとの相場とルールを構築しています..."):
-                extracted_rules, df_suumo = analyze_real_estate_data_v17(df_raw, uploaded_rules)
+                extracted_rules, df_suumo = analyze_real_estate_data_v18(df_raw, uploaded_rules)
                 
                 st.session_state['rules'] = extracted_rules
                 st.session_state['df_suumo'] = df_suumo
-                if 'map_df' in st.session_state:
-                    del st.session_state['map_df']
                 
-                st.success("✅ 解析完了！「②詳細査定シミュレーター」や「③マップ分析」タブへお進みください。")
+                st.success("✅ 解析完了！「②詳細査定シミュレーター」や「③エリア別相場ヒートマップ」タブへお進みください。")
 
 # ---------------------------------------------------------
 # TAB 2: シミュレーター画面
@@ -619,18 +614,19 @@ with tab2:
             st.info("条件に一致するデータがないため、相場分布のメーターは表示されません。")
 
 # ---------------------------------------------------------
-# TAB 3: マップ・単価分析画面 (絶対表示・3段構えエンジン)
+# 💡 TAB 3: 町丁目ごとの相場ヒートマップ＆リスト化エンジン
 # ---------------------------------------------------------
 with tab3:
     if 'df_suumo' not in st.session_state:
         st.warning("⚠️ 先に「①データの取得＆解析」タブでデータを取り込んでください。")
     else:
-        st.subheader("🗺️ 物件マップ ＆ ㎡単価ヒートマップ分析")
-        st.write("設定した条件で物件を絞り込み、地図上にプロットして㎡単価を表示します。")
+        st.subheader("🏘️ エリア（町丁目）別 相場ヒートマップ＆物件リスト")
+        st.write("「下高井戸１」などの住所（町丁目）ごとにデータを自動でグループ化し、相場水準を色分けしてリスト化します。")
         
         df = st.session_state['df_suumo']
         
-        st.markdown("**▼ 基本スペックでの絞り込み**")
+        # ▼ 基本スペックでの絞り込み
+        st.markdown("**▼ データの絞り込み条件**")
         col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
         
         valid_layouts_map = df['間取りグループ'].unique()
@@ -638,32 +634,34 @@ with tab3:
         station_list_map = ['指定なし'] + sorted([s for s in raw_stations_map if pd.notna(s) and str(s).strip() not in ['', 'nan', '不明']])
         
         with col_m1: map_layouts = st.multiselect("間取りタイプ", valid_layouts_map, default=valid_layouts_map)
-        with col_m2: map_station = st.selectbox("対象駅 (マップ用)", station_list_map)
+        with col_m2: map_station = st.selectbox("対象駅 (集計用)", station_list_map)
         with col_m3: map_min_area = st.number_input("専有面積の下限 (㎡)", min_value=0.0, value=15.0, step=5.0)
         with col_m4: map_max_age = st.number_input("築年数の上限 (年)", min_value=0, max_value=100, value=30)
         with col_m5: map_max_walk = st.number_input("駅徒歩の上限 (分)", min_value=0, max_value=60, value=15)
 
-        st.markdown("**▼ 建物種別 ＆ 設備条件での絞り込み**")
-        map_btype = st.radio("建物種別 (マップ用)", ["指定なし", "マンション", "アパート"], horizontal=True)
+        # ▼ 建物種別 ＆ 設備条件での絞り込み
+        map_btype = st.radio("建物種別 (集計用)", ["指定なし", "マンション", "アパート"], horizontal=True)
         
-        col_m6, col_m7, col_m8, col_m9 = st.columns(4)
-        with col_m6:
-            m_2f = st.checkbox("2階以上", value=False, key='m2f')
-            m_corner = st.checkbox("角部屋", value=False, key='mcorn')
-            m_south = st.checkbox("南向き", value=False, key='msou')
-        with col_m7:
-            m_bt = st.checkbox("バス・トイレ別", value=False, key='mbt')
-            m_sh = st.checkbox("洗面所独立", value=False, key='msh')
-            m_wc = st.checkbox("温水洗浄便座", value=False, key='mwc')
-            m_oidaki = st.checkbox("追い焚き風呂", value=False, key='moid')
-        with col_m8:
-            m_sys = st.checkbox("システムキッチン", value=False, key='msys')
-            m_dry = st.checkbox("浴室乾燥機", value=False, key='mdry')
-            m_net = st.checkbox("インターネット無料", value=False, key='mnet')
-        with col_m9:
-            m_auto = st.checkbox("オートロック", value=False, key='mauto')
-            m_box = st.checkbox("宅配ボックス", value=False, key='mbox')
+        with st.expander("➕ 詳細な設備条件で絞り込む"):
+            col_m6, col_m7, col_m8, col_m9 = st.columns(4)
+            with col_m6:
+                m_2f = st.checkbox("2階以上", value=False, key='m2f')
+                m_corner = st.checkbox("角部屋", value=False, key='mcorn')
+                m_south = st.checkbox("南向き", value=False, key='msou')
+            with col_m7:
+                m_bt = st.checkbox("バス・トイレ別", value=False, key='mbt')
+                m_sh = st.checkbox("洗面所独立", value=False, key='msh')
+                m_wc = st.checkbox("温水洗浄便座", value=False, key='mwc')
+                m_oidaki = st.checkbox("追い焚き風呂", value=False, key='moid')
+            with col_m8:
+                m_sys = st.checkbox("システムキッチン", value=False, key='msys')
+                m_dry = st.checkbox("浴室乾燥機", value=False, key='mdry')
+                m_net = st.checkbox("インターネット無料", value=False, key='mnet')
+            with col_m9:
+                m_auto = st.checkbox("オートロック", value=False, key='mauto')
+                m_box = st.checkbox("宅配ボックス", value=False, key='mbox')
 
+        # --- フィルタリング実行 ---
         filtered_df = df[
             (df['間取りグループ'].isin(map_layouts)) &
             (df['専有面積_m2'] >= map_min_area) &
@@ -671,13 +669,9 @@ with tab3:
             (df['築年'] <= map_max_age)
         ].copy()
         
-        if map_station != '指定なし':
-            filtered_df = filtered_df[filtered_df['駅名'] == map_station]
-        if map_btype != '指定なし':
-            filtered_df = filtered_df[filtered_df['建物種別_判定用'].str.contains(map_btype, na=False)]
-        if m_2f:
-            filtered_df = filtered_df[~filtered_df['階建'].str.match(r'^1階/|^1階$|地下', na=False)]
-            
+        if map_station != '指定なし': filtered_df = filtered_df[filtered_df['駅名'] == map_station]
+        if map_btype != '指定なし': filtered_df = filtered_df[filtered_df['建物種別_判定用'].str.contains(map_btype, na=False)]
+        if m_2f: filtered_df = filtered_df[~filtered_df['階建'].str.match(r'^1階/|^1階$|地下', na=False)]
         if m_corner: filtered_df = filtered_df[filtered_df['設備'].str.contains('角住戸|角部屋', na=False) | filtered_df['備考'].str.contains('角住戸|角部屋', na=False)]
         if m_south: filtered_df = filtered_df[filtered_df['設備'].str.contains('南向き', na=False) | filtered_df['備考'].str.contains('南向き', na=False)]
         if m_bt: filtered_df = filtered_df[filtered_df['設備'].str.contains('バストイレ別|バス・トイレ別', na=False)]
@@ -692,113 +686,62 @@ with tab3:
 
         st.info(f"💡 条件に一致する物件: {len(filtered_df)} 件")
         
-        if len(filtered_df) > 50:
-            st.warning("※件数が多すぎるため、変換負荷を考慮して上位50件のみをマップに表示します。さらに条件を絞り込むことをお勧めします。")
-            filtered_df = filtered_df.head(50)
+        if not filtered_df.empty:
+            st.markdown("### 📊 町丁目エリア別の平均相場（色分けリスト）")
+            st.write("※「平均㎡単価」が高い（割高な）エリアほど赤く、低い（割安な）エリアほど青く自動で色付けされます。表の見出しをクリックすると並び替えができます。")
+            
+            # 💡 エリア（住所）ごとの自動集計エンジン
+            area_stats = filtered_df.groupby('住所').agg(
+                物件数=('物件名', 'count'),
+                平均総家賃_万円=('総家賃', lambda x: x.mean() / 10000),
+                平均㎡単価_円=('㎡単価_総家賃', 'mean'),
+                平均専有面積_m2=('専有面積_m2', 'mean'),
+                平均築年数_年=('築年', 'mean'),
+                平均駅徒歩_分=('徒歩分数', 'mean')
+            ).reset_index()
+            
+            # ㎡単価で降順に並び替え
+            area_stats = area_stats.sort_values('平均㎡単価_円', ascending=False)
+            
+            # 💡 色付き（ヒートマップ）のデータフレームを生成
+            styled_stats = area_stats.style.background_gradient(
+                cmap='coolwarm', # 青〜赤のグラデーション
+                subset=['平均㎡単価_円']
+            ).format({
+                "平均総家賃_万円": "{:.1f}",
+                "平均㎡単価_円": "{:,.0f}",
+                "平均専有面積_m2": "{:.1f}",
+                "平均築年数_年": "{:.1f}",
+                "平均駅徒歩_分": "{:.1f}"
+            })
+            
+            # 表を表示（画面幅に合わせる）
+            st.dataframe(styled_stats, use_container_width=True, height=400)
 
-        if st.button("🗺️ 絞り込んだ条件でマップを更新・描画する"):
-            with st.spinner("住所を座標に変換しています...少々お待ちください。"):
-                geolocator = Nominatim(user_agent=f"suumo_analyzer_{random.randint(1000,9999)}")
-                
-                lats = []
-                lons = []
-                
-                # 💡 プログレスバーの追加
-                progress_bar_map = st.progress(0)
-                status_text_map = st.empty()
-                
-                total_items = len(filtered_df)
-                
-                # 💡 3段構えの座標取得エンジン
-                for i, (idx, row) in enumerate(filtered_df.iterrows()):
-                    raw_addr = str(row['住所'])
-                    clean_addr = re.sub(r'[\d０-９\-ー]+.*$', '', raw_addr)
-                    lat, lon = None, None
-                    
-                    try:
-                        time.sleep(1.0) # サーバーへの配慮
-                        
-                        # トライ1: 町名で検索
-                        loc = geolocator.geocode(clean_addr, timeout=5)
-                        if loc:
-                            lat, lon = loc.latitude, loc.longitude
-                        else:
-                            # トライ2: 最寄駅で検索（精度高）
-                            pref_match = re.search(r'^(.{2,3}[都道府県])', raw_addr)
-                            pref = pref_match.group(1) if pref_match else "東京都"
-                            station = str(row['駅名'])
-                            if station != '不明':
-                                time.sleep(1.0)
-                                loc_sta = geolocator.geocode(f"{station}駅, {pref}", timeout=5)
-                                if loc_sta:
-                                    lat, lon = loc_sta.latitude, loc_sta.longitude
-                                else:
-                                    # トライ3: 市区町村で検索（最終手段）
-                                    city_match = re.search(r'^(.+?[市区町村])', raw_addr)
-                                    if city_match:
-                                        time.sleep(1.0)
-                                        loc_city = geolocator.geocode(city_match.group(1), timeout=5)
-                                        if loc_city:
-                                            lat, lon = loc_city.latitude, loc_city.longitude
-                    except Exception:
-                        pass
-                        
-                    lats.append(lat)
-                    lons.append(lon)
-                    
-                    progress_bar_map.progress((i + 1) / total_items)
-                    status_text_map.text(f"座標変換中... ({i + 1}/{total_items}件 完了)")
-                    
-                progress_bar_map.empty()
-                status_text_map.empty()
-                
-                filtered_df['緯度'] = lats
-                filtered_df['経度'] = lons
-                
-                # 💡 ジッター処理（ピンが完全に重ならないように数十メートル散らす）
-                def add_jitter(val):
-                    if pd.notna(val):
-                        return val + random.uniform(-0.002, 0.002)
-                    return val
-                    
-                filtered_df['緯度'] = filtered_df['緯度'].apply(add_jitter)
-                filtered_df['経度'] = filtered_df['経度'].apply(add_jitter)
-                
-                st.session_state['map_df'] = filtered_df.dropna(subset=['緯度', '経度'])
-                
-        if 'map_df' in st.session_state and not st.session_state['map_df'].empty:
-            map_df = st.session_state['map_df']
-            st.success(f"✅ {len(map_df)} 件の物件をマップに配置しました！（※条件を変えた場合は再度ボタンを押してください）")
+            st.markdown("<br><hr>", unsafe_allow_html=True)
+            st.markdown("### 📋 指定エリアの物件詳細リスト")
             
-            center_lat = map_df['緯度'].mean()
-            center_lon = map_df['経度'].mean()
+            # 💡 選んだエリアの物件だけを下部にリスト表示する
+            selected_area_for_list = st.selectbox("詳細を確認したい町丁目を選択してください", ['すべて表示'] + list(area_stats['住所']))
             
-            m = folium.Map(location=[center_lat, center_lon], zoom_start=15)
+            if selected_area_for_list == 'すべて表示':
+                display_df = filtered_df.copy()
+            else:
+                display_df = filtered_df[filtered_df['住所'] == selected_area_for_list].copy()
             
-            for idx, row in map_df.iterrows():
-                tanka_m2 = row['㎡単価_総家賃']
-                
-                popup_html = f"""
-                <div style="width:200px;">
-                    <h4 style="margin:0; color:#0066cc;">{row['物件名']}</h4>
-                    <hr style="margin:5px 0;">
-                    <b>総家賃:</b> {row['総家賃']/10000:.1f} 万円<br>
-                    <b>間取り:</b> {row['間取り']} ({row['専有面積_m2']}㎡)<br>
-                    <b>築年数:</b> {row['築年']}年 / <b>駅徒歩:</b> {row['徒歩分数']}分<br>
-                    <div style="background-color:#fff3cd; padding:5px; margin-top:5px; border-radius:3px;">
-                        <b style="color:#d35400;">㎡単価: {int(tanka_m2):,} 円/㎡</b>
-                    </div>
-                </div>
-                """
-                
-                pin_color = "red" if tanka_m2 >= 4000 else "blue"
-                
-                folium.Marker(
-                    location=[row['緯度'], row['経度']],
-                    popup=folium.Popup(popup_html, max_width=300),
-                    icon=folium.Icon(color=pin_color, icon="home"),
-                ).add_to(m)
+            # リスト用にデータを綺麗に成形
+            display_cols = ['物件名', '住所', '間取り', '専有面積_m2', '総家賃', '㎡単価_総家賃', '階建', '築年', '徒歩分数', 'URL']
+            display_df = display_df[display_cols].sort_values('総家賃')
             
-            st_folium(m, width=900, height=600)
-        elif 'map_df' in st.session_state and st.session_state['map_df'].empty:
-            st.error("住所の座標変換に失敗しました。取得した住所データの形式が特殊な可能性があります。")
+            display_df['総家賃(万円)'] = (display_df['総家賃'] / 10000).round(1)
+            display_df['㎡単価(円)'] = display_df['㎡単価_総家賃'].astype(int).apply(lambda x: f"{x:,}")
+            
+            display_df_clean = display_df[['物件名', '住所', '間取り', '専有面積_m2', '総家賃(万円)', '㎡単価(円)', '階建', '築年', '徒歩分数', 'URL']]
+            
+            st.dataframe(
+                display_df_clean,
+                column_config={
+                    "URL": st.column_config.LinkColumn("物件リンク") # URLをクリック可能に
+                },
+                use_container_width=True
+            )
