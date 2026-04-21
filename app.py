@@ -719,8 +719,6 @@ with tab3:
             })
             
             # 表を表示（画面幅に合わせる）
-            st.dataframe(styled_stats, use_container_width=True, height=400)
-
             st.markdown("<br><hr>", unsafe_allow_html=True)
             st.markdown("### 📋 指定エリアの物件詳細リスト")
             
@@ -732,19 +730,30 @@ with tab3:
             else:
                 display_df = filtered_df[filtered_df['住所'] == selected_area_for_list].copy()
             
-            # リスト用にデータを綺麗に成形
+            # 💡 エラー回避：読み込んだデータに存在する列だけを抽出する
             display_cols = ['物件名', '住所', '間取り', '専有面積_m2', '総家賃', '㎡単価_総家賃', '階建', '築年', '徒歩分数', 'URL']
-            display_df = display_df[display_cols].sort_values('総家賃')
+            valid_cols = [c for c in display_cols if c in display_df.columns]
             
-            display_df['総家賃(万円)'] = (display_df['総家賃'] / 10000).round(1)
-            display_df['㎡単価(円)'] = display_df['㎡単価_総家賃'].astype(int).apply(lambda x: f"{x:,}")
+            display_df = display_df[valid_cols].sort_values('総家賃')
             
-            display_df_clean = display_df[['物件名', '住所', '間取り', '専有面積_m2', '総家賃(万円)', '㎡単価(円)', '階建', '築年', '徒歩分数', 'URL']]
+            if '総家賃' in display_df.columns:
+                display_df['総家賃(万円)'] = (display_df['総家賃'] / 10000).round(1)
+            if '㎡単価_総家賃' in display_df.columns:
+                display_df['㎡単価(円)'] = display_df['㎡単価_総家賃'].astype(int).apply(lambda x: f"{x:,}")
             
+            # 最終的な表示用の列もチェック
+            final_cols = ['物件名', '住所', '間取り', '専有面積_m2', '総家賃(万円)', '㎡単価(円)', '階建', '築年', '徒歩分数', 'URL']
+            valid_final_cols = [c for c in final_cols if c in display_df.columns]
+            
+            display_df_clean = display_df[valid_final_cols]
+            
+            # URL列が存在する場合のみリンク化する設定
+            col_config = {}
+            if "URL" in valid_final_cols:
+                col_config["URL"] = st.column_config.LinkColumn("物件リンク")
+                
             st.dataframe(
                 display_df_clean,
-                column_config={
-                    "URL": st.column_config.LinkColumn("物件リンク") # URLをクリック可能に
-                },
+                column_config=col_config,
                 use_container_width=True
             )
