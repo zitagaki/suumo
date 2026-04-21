@@ -10,34 +10,34 @@ import streamlit as st
 import io
 
 # =========================================================
-# 1. ページ設定
+# 1. ページ設定と記憶領域（セッション）の初期化
 # =========================================================
 st.set_page_config(page_title="不動産ハイブリッド査定システム", layout="wide")
+
+if 'raw_df' not in st.session_state:
+    st.session_state['raw_df'] = pd.DataFrame()
+if 'scraping_log' not in st.session_state:
+    st.session_state['scraping_log'] = ""
+
 st.title("🏡 不動産ハイブリッド査定システム (AI × プロの相場観)")
 
 # =========================================================
-# 2. スクレイピングエンジン
+# 2. スクレイピングエンジン (逐次セーブ・フルデータ取得版)
 # =========================================================
 def get_xpath_text(tree, xpath_str):
     try:
         elements = tree.xpath(xpath_str)
         if not elements and '/tbody' in xpath_str:
             elements = tree.xpath(xpath_str.replace('/tbody', ''))
-            
         if elements:
-            if isinstance(elements[0], str):
-                return elements[0].strip()
+            if isinstance(elements[0], str): return elements[0].strip()
             else:
                 text = elements[0].text_content()
                 return re.sub(r'\s+', ' ', text).strip()
-    except Exception:
-        pass
+    except Exception: pass
     return ""
 
-def scrape_suumo_list(base_url, max_pages, p_min, p_max, d_min, d_max):
-    all_data = []
-    error_msg = ""
-    
+def scrape_suumo_list_incremental(base_url, max_pages, p_min, p_max, d_min, d_max):
     session = requests.Session()
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -47,39 +47,34 @@ def scrape_suumo_list(base_url, max_pages, p_min, p_max, d_min, d_max):
         'Connection': 'keep-alive'
     }
     
-    base_url = base_url.replace('FR301FC005', 'FR301FC001')
-    base_url = base_url.replace('FR301FC006', 'FR301FC001')
-    base_url = base_url.replace('FR301FC007', 'FR301FC001')
-
+    base_url = base_url.replace('FR301FC005', 'FR301FC001').replace('FR301FC006', 'FR301FC001').replace('FR301FC007', 'FR301FC001')
     base_url = re.sub(r'&pn=\d+', '', base_url)
     base_url = re.sub(r'&page=\d+', '', base_url)
     separator = '&' if '?' in base_url else '?'
     
     progress_bar = st.progress(0)
     status_text = st.empty()
+    new_data = []
 
     for page in range(1, max_pages + 1):
         url = f"{base_url}{separator}pn={page}"
-        
         try:
             wait_time = random.uniform(p_min, p_max)
-            status_text.text(f"ページ遷移の待機中... ({wait_time:.1f}秒)")
+            status_text.text(f"⏳ {page}ページ目へ遷移中... ({wait_time:.1f}秒待機)")
             time.sleep(wait_time)
             
             res = session.get(url, headers=headers, timeout=15)
-            
             if res.status_code == 403:
-                error_msg = f"一覧ページ（{page}ページ目）でSUUMOのアクセス制限（403 Forbidden）を検知しました。"
+                st.session_state['scraping_log'] = f"❌ {page}ページ目の一覧表示でSUUMOのブロック(403)を検知しました。ここまでのデータを保存して終了します。"
                 break
                 
             res.raise_for_status() 
             res.encoding = res.apparent_encoding 
-            
             soup = BeautifulSoup(res.content, 'html.parser')
             items = soup.find_all("div", class_="cassetteitem")
             
             if not items:
-                st.warning(f"⚠️ ページ {page} から物件データを抽出できませんでした。（データが終了した可能性があります）")
+                st.session_state['scraping_log'] = f"⚠️ {page}ページ目からデータが見つかりませんでした（最終ページの可能性があります）。"
                 break
                 
             total_rooms = sum([len(item.find_all("tbody")) for item in items])
@@ -111,7 +106,7 @@ def scrape_suumo_list(base_url, max_pages, p_min, p_max, d_min, d_max):
                 tbodies = item.find_all("tbody")
                 for tbody in tbodies:
                     room_count += 1
-                    status_text.text(f"🚀 詳細ページから全項目を精密抽出中... (P{page} : {room_count}/{total_rooms}部屋目)")
+                    status_text.text(f"🚀 詳細データ取得中... (P{page} : {room_count}/{total_rooms}部屋目)")
                     
                     rent = tbody.find("span", class_="cassetteitem_price cassetteitem_price--rent")
                     admin = tbody.find("span", class_="cassetteitem_price cassetteitem_price--administration")
@@ -148,8 +143,11 @@ def scrape_suumo_list(base_url, max_pages, p_min, p_max, d_min, d_max):
                             d_res = session.get(full_url, headers=headers, timeout=10)
                             
                             if d_res.status_code == 403:
-                                error_msg = f"詳細ページの取得中（{page}ページ目）にSUUMOのアクセス制限（403 Forbidden）を検知しました。"
-                                break 
+                                st.session_state['scraping_log'] = f"❌ {page}ページ目（{title}）の詳細取得中にブロックされました。ここまでのデータを保存します。"
+                                temp_df = pd.DataFrame(new_data)
+                                if not temp_df.empty:
+                                    st.session_state['raw_df'] = pd.concat([st.session_state['raw_df'], temp_df]).drop_duplicates(subset=['物件名', '家賃', '共益費', '間取り', '専有面積', '階建'], keep='first')
+                                return # ここで完全に強制終了
                                 
                             d_tree = lxml.html.fromstring(d_res.content)
                             
@@ -185,7 +183,7 @@ def scrape_suumo_list(base_url, max_pages, p_min, p_max, d_min, d_max):
                     setsubi = setsubi or detail_dict.get("部屋の特徴・設備", detail_dict.get("設備", ""))
                     shop_name = shop_name or detail_dict.get("取り扱い店舗", "")
 
-                    all_data.append({
+                    new_data.append({
                         "物件名": title,
                         "家賃": rent.text.strip() if rent else "",
                         "共益費": admin.text.strip() if admin else "",
@@ -221,45 +219,33 @@ def scrape_suumo_list(base_url, max_pages, p_min, p_max, d_min, d_max):
                         "バルコニー面積": detail_dict.get("バルコニー面積", ""),
                         "URL": full_url
                     })
-                
-                if error_msg:
-                    break
+            
+            # 💡 1ページ終わるごとにAIの記憶(session)にセーブし、重複を削除
+            temp_df = pd.DataFrame(new_data)
+            if not temp_df.empty:
+                st.session_state['raw_df'] = pd.concat([st.session_state['raw_df'], temp_df]).drop_duplicates(subset=['物件名', '家賃', '共益費', '間取り', '専有面積', '階建'], keep='first')
+            new_data = [] # リセットして次のページへ
             
             progress_bar.progress(page / max_pages)
-            if error_msg:
-                break
                 
         except requests.exceptions.Timeout:
-            error_msg = f"ページ {page} で通信タイムアウトが発生しました。SUUMOサーバーの応答が遅延しています。"
+            st.session_state['scraping_log'] = f"❌ {page}ページ目で通信タイムアウトが発生しました。ここまでのデータを保存します。"
             break
         except Exception as e:
-            error_msg = f"ページ {page} で予期せぬエラーが発生しました: {str(e)}"
+            st.session_state['scraping_log'] = f"⚠️ 予期せぬエラー({str(e)})が発生しました。ここまでのデータを保存します。"
             break
             
-    progress_bar.empty()
-    if error_msg:
-        status_text.warning("⚠️ 制限検知のため、取得処理を安全に中断しました。")
-    else:
-        status_text.success("✅ 全ての詳細データの取得が完了しました！")
-    
-    df = pd.DataFrame(all_data)
-    
-    if not df.empty:
-        before_count = len(df)
-        df = df.drop_duplicates(subset=['物件名', '家賃', '共益費', '間取り', '専有面積', '階建'], keep='first')
-        after_count = len(df)
-        removed_count = before_count - after_count
+    if not st.session_state['scraping_log']:
+        st.session_state['scraping_log'] = "✅ 指定された全ページの処理が完了しました。"
         
-        if removed_count > 0:
-            st.info(f"✨ 自動クレンジング: 複数会社から出稿されていた同一物件の重複を {removed_count} 件 削除しました。（実数: {after_count}件）")
-            
-    return df, error_msg
+    status_text.empty()
+    progress_bar.empty()
 
 # =========================================================
 # 3. 前処理・データ読み込みエンジン
 # =========================================================
 @st.cache_data
-def analyze_real_estate_data_v18(raw_df, rules_file):
+def analyze_real_estate_data_final(raw_df, rules_file):
     df_rules = pd.read_csv(rules_file)
     extracted_rules = {}
     madori_list = ['ワンルーム', '1K・1DK', '1LDK', '2K・2DK', '2LDK', '3K・3DK', '3LDK']
@@ -354,11 +340,12 @@ def analyze_real_estate_data_v18(raw_df, rules_file):
 tab1, tab2, tab3 = st.tabs(["📂 ①データの取得＆解析", "🤖 ②詳細査定シミュレーター", "🏘️ ③エリア別相場ヒートマップ"])
 
 # ---------------------------------------------------------
-# TAB 1: アップロード / スクレイピング画面
+# TAB 1: アップロード / スクレイピング画面 (完全復旧版)
 # ---------------------------------------------------------
 with tab1:
     st.write("「SUUMOから自動取得」または「お手元のExcelファイルアップロード」のどちらかを選択してください。")
     
+    # ▼ ラジオボタン復活！
     data_source = st.radio("データソースの選択", ["🌐 SUUMOのURLから自動取得 (スクレイピング)", "📁 エクセル/CSVファイルをアップロード"])
     
     df_raw = None
@@ -381,33 +368,47 @@ with tab1:
             p_min_actual, p_max_actual = min(p_min, p_max), max(p_min, p_max)
             d_min_actual, d_max_actual = min(d_min, d_max), max(d_min, d_max)
 
-        if st.button("🚀 データを取得する"):
-            if target_url:
-                with st.spinner("SUUMOから全物件の詳細データを自動収集しています..."):
-                    scraped_df, error_msg = scrape_suumo_list(target_url, max_pages, p_min_actual, p_max_actual, d_min_actual, d_max_actual)
-                    
-                    if not scraped_df.empty:
-                        st.session_state['raw_df'] = scraped_df
-                        if error_msg:
-                            st.warning(f"⚠️ **取得中断のお知らせ**\n\n{error_msg}\n\nそこまでに取得できた {len(scraped_df)} 件のデータは安全に保存されました！")
-                        else:
-                            st.success("✅ データの取得と重複クレンジングが完了しました！")
-                    else:
-                        st.error("データの取得に失敗しました。URLが正しいか確認してください。")
+        # 💡 ボタンとレスキューダウンロードを横並びに配置
+        col_btn, col_res = st.columns([1, 1])
+        
+        with col_btn:
+            if st.button("🚀 データを取得する"):
+                if target_url:
+                    # 開始時にログとデータをリセット
+                    st.session_state['raw_df'] = pd.DataFrame()
+                    st.session_state['scraping_log'] = ""
+                    with st.spinner("SUUMOから全物件の詳細データを自動収集しています..."):
+                        scrape_suumo_list_incremental(target_url, max_pages, p_min_actual, p_max_actual, d_min_actual, d_max_actual)
+                else:
+                    st.warning("URLを入力してください。")
+
+        with col_res:
+            # 💡 常設のレスキューダウンロードボタン
+            if 'raw_df' in st.session_state and not st.session_state['raw_df'].empty:
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                    st.session_state['raw_df'].to_excel(writer, index=False)
+                st.download_button(
+                    label=f"📥 取得済みデータ ({len(st.session_state['raw_df'])}件) を保存（中断時用）",
+                    data=buffer.getvalue(),
+                    file_name="suumo_rescue_data.xlsx",
+                    mime="application/vnd.ms-excel"
+                )
+
+        # ログの表示
+        if 'scraping_log' in st.session_state and st.session_state['scraping_log']:
+            if "❌" in st.session_state['scraping_log'] or "⚠️" in st.session_state['scraping_log']:
+                st.warning(st.session_state['scraping_log'])
             else:
-                st.warning("URLを入力してください。")
-                
-        if 'raw_df' in st.session_state:
+                st.success(st.session_state['scraping_log'])
+
+        if 'raw_df' in st.session_state and not st.session_state['raw_df'].empty:
             st.write("取得したデータプレビュー:")
             st.dataframe(st.session_state['raw_df'].head())
             df_raw = st.session_state['raw_df']
-            
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                df_raw.to_excel(writer, index=False)
-            st.download_button(label="📥 取得したデータをExcelで保存（重複削除済み）", data=buffer.getvalue(), file_name="suumo_scraped_data_deduplicated.xlsx", mime="application/vnd.ms-excel")
 
     else:
+        # ▼ ファイルアップロード画面復活！
         uploaded_suumo = st.file_uploader("SUUMO物件データ (Excel/CSV)", type=["xlsx", "csv"])
         if uploaded_suumo:
             try:
@@ -417,17 +418,16 @@ with tab1:
             st.success("✅ ファイルを読み込みました！")
 
     st.markdown("---")
+    # ▼ ルールCSVのアップロード画面復活！
     st.write("▼ 共通: ルールCSVをアップロードして解析を実行してください")
     uploaded_rules = st.file_uploader("ルールフォーマット (CSV) ※必須", type=["csv"])
 
     if df_raw is not None and uploaded_rules is not None:
         if st.button("🧠 解析してシミュレーターを起動"):
             with st.spinner("データを解析し、駅ごとの相場とルールを構築しています..."):
-                extracted_rules, df_suumo = analyze_real_estate_data_v18(df_raw, uploaded_rules)
-                
+                extracted_rules, df_suumo = analyze_real_estate_data_final(df_raw, uploaded_rules)
                 st.session_state['rules'] = extracted_rules
                 st.session_state['df_suumo'] = df_suumo
-                
                 st.success("✅ 解析完了！「②詳細査定シミュレーター」や「③エリア別相場ヒートマップ」タブへお進みください。")
 
 # ---------------------------------------------------------
@@ -613,7 +613,7 @@ with tab2:
             st.info("条件に一致するデータがないため、相場分布のメーターは表示されません。")
 
 # ---------------------------------------------------------
-# 💡 TAB 3: 町丁目ごとの相場ヒートマップ＆リスト化エンジン
+# TAB 3: 町丁目ごとの相場ヒートマップ＆リスト化エンジン
 # ---------------------------------------------------------
 with tab3:
     if 'df_suumo' not in st.session_state:
@@ -624,7 +624,6 @@ with tab3:
         
         df = st.session_state['df_suumo']
         
-        # 💡 ここで計算基準を選択できるように追加
         calc_mode_map = st.radio("💰 単価計算の基準（ヒートマップ用）", ["家賃＋共益費（総家賃）で計算", "家賃のみで計算"], horizontal=True, key="map_calc_mode")
         rent_col_map = '総家賃' if calc_mode_map == "家賃＋共益費（総家賃）で計算" else '家賃_円'
         tanka_col_map = '㎡単価_総家賃' if calc_mode_map == "家賃＋共益費（総家賃）で計算" else '㎡単価_家賃のみ'
@@ -690,7 +689,6 @@ with tab3:
         if not filtered_df.empty:
             st.markdown("### 📊 町丁目エリア別の平均相場リスト")
             
-            # 💡 選択された基準で集計を行う
             area_stats = filtered_df.groupby('住所').agg(
                 物件数=('物件名', 'count'),
                 平均価格_万円=(rent_col_map, lambda x: x.mean() / 10000),
@@ -737,7 +735,6 @@ with tab3:
             else:
                 display_df = filtered_df[filtered_df['住所'] == selected_area_for_list].copy()
             
-            # 💡 選択された基準でリストも再構成する
             display_cols = ['物件名', '住所', '間取り', '専有面積_m2', rent_col_map, tanka_col_map, '階建', '築年', '徒歩分数', 'URL']
             valid_cols = [c for c in display_cols if c in display_df.columns]
             
