@@ -631,3 +631,103 @@ with tab2:
                 
         else:
             st.info("条件に一致するデータがないため、相場分布のメーターは表示されません。")
+# ---------------------------------------------------------
+# TAB 3: マップ・単価分析画面
+# ---------------------------------------------------------
+with tab3:
+    if 'df_suumo' not in st.session_state:
+        st.warning("⚠️ 先に「①データの取得＆解析」タブでデータを取り込んでください。")
+    else:
+        st.subheader("🗺️ 物件マップ ＆ ㎡単価ヒートマップ分析")
+        st.write("設定した条件で物件を絞り込み、地図上にプロットして㎡単価を表示します。")
+        
+        df = st.session_state['df_suumo']
+        
+        # --- 絞り込みUI ---
+        st.markdown("**▼ マップに表示する物件の絞り込み**")
+        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+        
+        valid_layouts_map = df['間取りグループ'].unique()
+        with col_m1:
+            map_layout = st.multiselect("間取り", valid_layouts_map, default=valid_layouts_map)
+        with col_m2:
+            map_max_rent = st.number_input("総家賃の上限 (万円)", value=25.0, step=1.0)
+        with col_m3:
+            map_max_walk = st.number_input("駅徒歩の上限 (分)", value=15, step=1)
+        with col_m4:
+            map_max_age = st.number_input("築年数の上限 (年)", value=30, step=1)
+
+        # データフィルタリング
+        filtered_df = df[
+            (df['間取りグループ'].isin(map_layout)) &
+            (df['総家賃'] <= map_max_rent * 10000) &
+            (df['徒歩分数'] <= map_max_walk) &
+            (df['築年'] <= map_max_age)
+        ].copy()
+
+        st.info(f"💡 条件に一致する物件: {len(filtered_df)} 件")
+        
+        if len(filtered_df) > 50:
+            st.warning("※件数が多すぎるため、変換負荷を考慮して上位50件のみをマップに表示します。さらに条件を絞り込むことをお勧めします。")
+            filtered_df = filtered_df.head(50)
+
+        # --- マップ描画ボタン ---
+        if st.button("🗺️ マップを描画する (※住所の座標変換に数十秒かかります)"):
+            with st.spinner(f"{len(filtered_df)}件の住所を座標に変換しています...少々お待ちください。"):
+                
+                # ジオコーディングの設定 (無料のOpenStreetMapを使用)
+                geolocator = Nominatim(user_agent="suumo_real_estate_analyzer")
+                # サーバー負荷対策：1秒に1回のアクセスに制限
+                geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1.0)
+                
+                # 住所から緯度経度を取得（「東京都杉並区～」などの文字列を座標に）
+                filtered_df['location'] = filtered_df['住所'].apply(geocode)
+                filtered_df['緯度'] = filtered_df['location'].apply(lambda loc: loc.latitude if loc else None)
+                filtered_df['経度'] = filtered_df['location'].apply(lambda loc: loc.longitude if loc else None)
+                
+                # 座標が取得できた物件のみ抽出
+                map_df = filtered_df.dropna(subset=['緯度', '経度'])
+                
+                if not map_df.empty:
+                    st.success(f"✅ {len(map_df)} 件の物件をマップに配置しました！")
+                    
+                    # 地図の中心点を計算（取得した物件の平均座標）
+                    center_lat = map_df['緯度'].mean()
+                    center_lon = map_df['経度'].mean()
+                    
+                    # 地図の初期化 (Folium)
+                    m = folium.Map(location=[center_lat, center_lon], zoom_start=15)
+                    
+                    # 各物件にピンを刺す
+                    for idx, row in map_df.iterrows():
+                        # ㎡単価の計算（坪単価に応用も可能）
+                        tanka_m2 = row['㎡単価_総家賃']
+                        
+                        # ピンをクリックした時に出るポップアップ（HTMLで装飾）
+                        popup_html = f"""
+                        <div style="width:200px;">
+                            <h4 style="margin:0; color:#0066cc;">{row['物件名']}</h4>
+                            <hr style="margin:5px 0;">
+                            <b>総家賃:</b> {row['総家賃']/10000:.1f} 万円<br>
+                            <b>間取り:</b> {row['間取り']} ({row['専有面積_m2']}㎡)<br>
+                            <b>築年数:</b> {row['築年']}年 / <b>駅徒歩:</b> {row['徒歩分数']}分<br>
+                            <div style="background-color:#fff3cd; padding:5px; margin-top:5px; border-radius:3px;">
+                                <b style="color:#d35400;">㎡単価: {int(tanka_m2):,} 円/㎡</b>
+                            </div>
+                        </div>
+                        """
+                        
+                        # ㎡単価の高さに応じてピンの色を変える（直感的な割安・割高の把握）
+                        # ※ここでは仮の基準値として、4000円以上を赤、それ以外を青にしています
+                        pin_color = "red" if tanka_m2 >= 4000 else "blue"
+                        
+                        folium.Marker(
+                            location=[row['緯度'], row['経度']],
+                            popup=folium.Popup(popup_html, max_width=300),
+                            icon=folium.Icon(color=pin_color, icon="home"),
+                        ).add_to(m)
+                    
+                    # Streamlit上でマップを表示
+                    st_folium(m, width=900, height=600)
+                else:
+                    st.error("住所の座標変換に失敗しました。取得した住所データの形式が特殊な可能性があります。")
