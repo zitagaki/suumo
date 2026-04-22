@@ -630,7 +630,7 @@ with tab2:
             st.info("条件に一致するデータがないため、相場分布のメーターは表示されません。")
 
 # ---------------------------------------------------------
-# 💡 TAB 3: 町丁目ごとの相場ヒートマップ＆リスト化エンジン (高機能フィルター＆ボリュームゾーン搭載版)
+# 💡 TAB 3: 町丁目ごとの相場ヒートマップ＆リスト化エンジン (リンク切れ対策・物件カルテ搭載版)
 # ---------------------------------------------------------
 with tab3:
     if 'df_suumo' not in st.session_state:
@@ -653,12 +653,10 @@ with tab3:
         station_list_map = sorted([s for s in raw_stations_map if pd.notna(s) and str(s).strip() not in ['', 'nan', '不明']])
         
         with col_m1: map_layouts = st.multiselect("間取りタイプ", valid_layouts_map, default=valid_layouts_map)
-        # 💡 複数選択可能なマルチセレクトに変更！（空にすると全駅対象になります）
         with col_m2: map_stations = st.multiselect("対象駅（複数選択可 / 空欄で全駅対象）", station_list_map)
         
         st.markdown("**▼ スペックの範囲指定（左右の丸をつまんで下限〜上限を設定）**")
         col_m3, col_m4, col_m5 = st.columns(3)
-        # 💡 直感的なスライダーに変更！
         with col_m3: map_area = st.slider("専有面積 (㎡)", min_value=0.0, max_value=200.0, value=(10.0, 100.0), step=1.0)
         with col_m4: map_age = st.slider("築年数 (年)", min_value=0, max_value=100, value=(0, 40))
         with col_m5: map_walk = st.slider("駅徒歩 (分)", min_value=0, max_value=60, value=(0, 20))
@@ -684,7 +682,6 @@ with tab3:
                 m_auto = st.checkbox("オートロック", value=False, key='mauto')
                 m_box = st.checkbox("宅配ボックス", value=False, key='mbox')
 
-        # 💡 フィルターの適用（上限・下限の両方で絞り込み）
         filtered_df = df[
             (df['間取りグループ'].isin(map_layouts)) &
             (df['専有面積_m2'] >= map_area[0]) & (df['専有面積_m2'] <= map_area[1]) &
@@ -695,7 +692,6 @@ with tab3:
         if map_stations: filtered_df = filtered_df[filtered_df['駅名'].isin(map_stations)]
         if map_btype != '指定なし': filtered_df = filtered_df[filtered_df['建物種別_判定用'].str.contains(map_btype, na=False)]
         
-        # 設備フィルター
         if m_2f: filtered_df = filtered_df[~filtered_df['階建'].str.match(r'^1階/|^1階$|地下', na=False)]
         if m_corner: filtered_df = filtered_df[filtered_df['設備'].str.contains('角住戸|角部屋', na=False) | filtered_df['備考'].str.contains('角住戸|角部屋', na=False)]
         if m_south: filtered_df = filtered_df[filtered_df['設備'].str.contains('南向き', na=False) | filtered_df['備考'].str.contains('南向き', na=False)]
@@ -714,7 +710,6 @@ with tab3:
         if not filtered_df.empty:
             st.markdown("### 📊 町丁目エリア別の平均相場＆ボリュームゾーン")
             
-            # 💡 ボリュームゾーン計算用の関数
             def calc_price_vz(x):
                 if len(x) < 3: return "-"
                 return f"{(x.quantile(0.333)/10000):.1f} 〜 {(x.quantile(0.667)/10000):.1f}"
@@ -726,9 +721,9 @@ with tab3:
             area_stats = filtered_df.groupby('住所').agg(
                 物件数=('物件名', 'count'),
                 平均価格_万円=(rent_col_map, lambda x: x.mean() / 10000),
-                価格ボリューム帯_万円=(rent_col_map, calc_price_vz), # 💡 追加！
+                価格ボリューム帯_万円=(rent_col_map, calc_price_vz),
                 平均平米単価_円=(tanka_col_map, 'mean'),
-                単価ボリューム帯_円=(tanka_col_map, calc_tanka_vz), # 💡 追加！
+                単価ボリューム帯_円=(tanka_col_map, calc_tanka_vz),
                 平均専有面積_m2=('専有面積_m2', 'mean'),
                 平均築年数_年=('築年', 'mean'),
                 平均駅徒歩_分=('徒歩分数', 'mean')
@@ -748,10 +743,8 @@ with tab3:
                     "平均築年数_年": "{:.1f}",
                     "平均駅徒歩_分": "{:.1f}"
                 })
-                st.write("※「平均㎡単価」が高い（割高な）エリアほど赤く、低い（割安な）エリアほど青く自動で色付けされます。データが少ない場合はボリューム帯に「-」が表示されます。")
                 st.dataframe(styled_stats, use_container_width=True, height=400)
             except ImportError:
-                st.warning("※ requirements.txt に matplotlib がないため色なしで表示しています。")
                 styled_stats = area_stats.style.format({
                     "平均価格_万円": "{:.1f}",
                     "平均㎡単価_円": "{:,.0f}",
@@ -771,31 +764,85 @@ with tab3:
             else:
                 display_df = filtered_df[filtered_df['住所'] == selected_area_for_list].copy()
             
-            display_cols = ['物件名', 'URL', '住所', '間取り', '専有面積_m2', rent_col_map, tanka_col_map, '階建', '築年', '徒歩分数']
-            valid_cols = [c for c in display_cols if c in display_df.columns]
+            # URL列名のブレを吸収
+            url_cols = [c for c in display_df.columns if 'URL' in str(c).upper() or 'リンク' in str(c)]
+            if url_cols and 'URL' not in display_df.columns:
+                display_df = display_df.rename(columns={url_cols[0]: 'URL'})
             
-            display_df = display_df[valid_cols].sort_values(rent_col_map)
+            display_df = display_df.sort_values(rent_col_map)
             
+            # 💡 表示用のクリーンな表を作成（元データのdisplay_dfはそのまま残す）
+            display_df_clean = display_df.copy()
             price_col_label = '総家賃(万円)' if rent_col_map == '総家賃' else '家賃(万円)'
             
-            if rent_col_map in display_df.columns:
-                display_df[price_col_label] = (display_df[rent_col_map] / 10000).round(1)
-            if tanka_col_map in display_df.columns:
-                display_df['㎡単価(円)'] = display_df[tanka_col_map].astype(int).apply(lambda x: f"{x:,}")
+            if rent_col_map in display_df_clean.columns:
+                display_df_clean[price_col_label] = (display_df_clean[rent_col_map] / 10000).round(1)
+            if tanka_col_map in display_df_clean.columns:
+                display_df_clean['㎡単価(円)'] = display_df_clean[tanka_col_map].astype(int).apply(lambda x: f"{x:,}")
             
-            # 💡 表示列の並び順を調整（URLを物件名の直後に配置）
             final_cols = ['物件名', 'URL', '住所', '間取り', '専有面積_m2', price_col_label, '㎡単価(円)', '階建', '築年', '徒歩分数']
-            valid_final_cols = [c for c in final_cols if c in display_df.columns]
+            valid_final_cols = [c for c in final_cols if c in display_df_clean.columns]
             
-            display_df_clean = display_df[valid_final_cols]
+            display_df_view = display_df_clean[valid_final_cols].copy()
             
             col_config = {}
             if "URL" in valid_final_cols:
-                # 💡 URLの生の文字列を「🔗 詳細を見る」というクリックできるボタン風のリンクに変換！
+                display_df_view['URL'] = display_df_view['URL'].fillna("")
                 col_config["URL"] = st.column_config.LinkColumn("物件リンク", display_text="🔗 詳細を見る")
                 
             st.dataframe(
-                display_df_clean,
+                display_df_view,
                 column_config=col_config,
                 use_container_width=True
             )
+
+            # =========================================================
+            # 💡 追加：裏側に保持している「すべてのデータ」を見せる機能
+            # =========================================================
+            st.markdown("<br>#### 🕵️ リンク切れ対策：物件の詳細カルテ", unsafe_allow_html=True)
+            st.write("※SUUMOの掲載が終了してURLが見られなくなっても、取得時の全データをここで確認・ダウンロードできます。")
+            
+            # ユニークな選択肢を作成（同じ物件名の重複を避けるため）
+            display_df['セレクト用ラベル'] = display_df['物件名'] + "（" + display_df['階建'].astype(str) + " / " + display_df[rent_col_map].astype(str) + "円）"
+            prop_options = ["選択してください"] + display_df['セレクト用ラベル'].tolist()
+            
+            col_d1, col_d2 = st.columns([2, 1])
+            with col_d1:
+                selected_prop_label = st.selectbox("詳細を確認したい物件を上のリストから選んでください", prop_options)
+            with col_d2:
+                # 💡 指定エリアの「全項目」データダウンロード
+                buffer_area = io.BytesIO()
+                with pd.ExcelWriter(buffer_area, engine='xlsxwriter') as writer:
+                    display_df.drop(columns=['セレクト用ラベル']).to_excel(writer, index=False)
+                st.download_button(
+                    label="📥 表示中リストの【全項目データ】をExcel保存",
+                    data=buffer_area.getvalue(),
+                    file_name=f"suumo_detail_{selected_area_for_list}.xlsx",
+                    mime="application/vnd.ms-excel"
+                )
+                
+            # 選ばれた物件の全データを表示
+            if selected_prop_label != "選択してください":
+                prop_data = display_df[display_df['セレクト用ラベル'] == selected_prop_label].iloc[0]
+                
+                st.markdown(f"<div style='background-color:#f8f9fa; padding:20px; border-radius:10px; border: 1px solid #ddd;'>", unsafe_allow_html=True)
+                st.markdown(f"<h5 style='color:#0066cc;'>🏢 {prop_data.get('物件名', '不明')}</h5>", unsafe_allow_html=True)
+                
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    st.markdown(f"**💰 家賃 / 共益費:**<br>{prop_data.get('家賃', '-')} / {prop_data.get('共益費', '-')}", unsafe_allow_html=True)
+                    st.markdown(f"**🪙 敷金 / 礼金:**<br>{prop_data.get('敷金', '-')} / {prop_data.get('礼金', '-')}", unsafe_allow_html=True)
+                    st.markdown(f"**📐 間取り / 面積:**<br>{prop_data.get('間取り', '-')} / {prop_data.get('専有面積', '-')}", unsafe_allow_html=True)
+                with c2:
+                    st.markdown(f"**🏢 構造 / 階建:**<br>{prop_data.get('構造', '-')} / {prop_data.get('階建', '-')}", unsafe_allow_html=True)
+                    st.markdown(f"**📅 築年月 / 入居:**<br>{prop_data.get('築年月', '-')} / {prop_data.get('入居時期', '-')}", unsafe_allow_html=True)
+                    st.markdown(f"**🚉 最寄駅:**<br>{prop_data.get('最寄駅1', '-')}", unsafe_allow_html=True)
+                with c3:
+                    st.markdown(f"**🤝 態様 / 条件:**<br>{prop_data.get('態様', '-')} / {prop_data.get('条件', '-')}", unsafe_allow_html=True)
+                    st.markdown(f"**🏪 取扱店舗:**<br>{prop_data.get('店舗', '-')}", unsafe_allow_html=True)
+                    st.markdown(f"**🔄 情報更新日:**<br>{prop_data.get('情報更新日', '-')}", unsafe_allow_html=True)
+                    
+                st.markdown("---")
+                st.markdown(f"**🛁 設備:**<br><span style='color:#555;'>{prop_data.get('設備', '-')}</span>", unsafe_allow_html=True)
+                st.markdown(f"**📝 備考:**<br><span style='color:#555;'>{prop_data.get('備考', '-')}</span>", unsafe_allow_html=True)
+                st.markdown("</div>", unsafe_allow_html=True)
