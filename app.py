@@ -630,14 +630,14 @@ with tab2:
             st.info("条件に一致するデータがないため、相場分布のメーターは表示されません。")
 
 # ---------------------------------------------------------
-# TAB 3: 町丁目ごとの相場ヒートマップ＆リスト化エンジン
+# 💡 TAB 3: 町丁目ごとの相場ヒートマップ＆リスト化エンジン (高機能フィルター＆ボリュームゾーン搭載版)
 # ---------------------------------------------------------
 with tab3:
     if 'df_suumo' not in st.session_state:
         st.warning("⚠️ 先に「①データの取得＆解析」タブでデータを取り込んでください。")
     else:
         st.subheader("🏘️ エリア（町丁目）別 相場ヒートマップ＆物件リスト")
-        st.write("「下高井戸１」などの住所（町丁目）ごとにデータを自動でグループ化し、相場水準をリスト化します。")
+        st.write("「下高井戸１」などの住所ごとにデータを自動グループ化し、相場水準やボリュームゾーンをリスト化します。")
         
         df = st.session_state['df_suumo']
         
@@ -646,17 +646,22 @@ with tab3:
         tanka_col_map = '㎡単価_総家賃' if calc_mode_map == "家賃＋共益費（総家賃）で計算" else '㎡単価_家賃のみ'
         
         st.markdown("**▼ データの絞り込み条件**")
-        col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
+        col_m1, col_m2 = st.columns(2)
         
         valid_layouts_map = df['間取りグループ'].unique()
         raw_stations_map = df['駅名'].unique()
-        station_list_map = ['指定なし'] + sorted([s for s in raw_stations_map if pd.notna(s) and str(s).strip() not in ['', 'nan', '不明']])
+        station_list_map = sorted([s for s in raw_stations_map if pd.notna(s) and str(s).strip() not in ['', 'nan', '不明']])
         
         with col_m1: map_layouts = st.multiselect("間取りタイプ", valid_layouts_map, default=valid_layouts_map)
-        with col_m2: map_station = st.selectbox("対象駅 (集計用)", station_list_map)
-        with col_m3: map_min_area = st.number_input("専有面積の下限 (㎡)", min_value=0.0, value=15.0, step=5.0)
-        with col_m4: map_max_age = st.number_input("築年数の上限 (年)", min_value=0, max_value=100, value=30)
-        with col_m5: map_max_walk = st.number_input("駅徒歩の上限 (分)", min_value=0, max_value=60, value=15)
+        # 💡 複数選択可能なマルチセレクトに変更！（空にすると全駅対象になります）
+        with col_m2: map_stations = st.multiselect("対象駅（複数選択可 / 空欄で全駅対象）", station_list_map)
+        
+        st.markdown("**▼ スペックの範囲指定（左右の丸をつまんで下限〜上限を設定）**")
+        col_m3, col_m4, col_m5 = st.columns(3)
+        # 💡 直感的なスライダーに変更！
+        with col_m3: map_area = st.slider("専有面積 (㎡)", min_value=0.0, max_value=200.0, value=(10.0, 100.0), step=1.0)
+        with col_m4: map_age = st.slider("築年数 (年)", min_value=0, max_value=100, value=(0, 40))
+        with col_m5: map_walk = st.slider("駅徒歩 (分)", min_value=0, max_value=60, value=(0, 20))
 
         map_btype = st.radio("建物種別 (集計用)", ["指定なし", "マンション", "アパート"], horizontal=True)
         
@@ -679,15 +684,18 @@ with tab3:
                 m_auto = st.checkbox("オートロック", value=False, key='mauto')
                 m_box = st.checkbox("宅配ボックス", value=False, key='mbox')
 
+        # 💡 フィルターの適用（上限・下限の両方で絞り込み）
         filtered_df = df[
             (df['間取りグループ'].isin(map_layouts)) &
-            (df['専有面積_m2'] >= map_min_area) &
-            (df['徒歩分数'] <= map_max_walk) &
-            (df['築年'] <= map_max_age)
+            (df['専有面積_m2'] >= map_area[0]) & (df['専有面積_m2'] <= map_area[1]) &
+            (df['徒歩分数'] >= map_walk[0]) & (df['徒歩分数'] <= map_walk[1]) &
+            (df['築年'] >= map_age[0]) & (df['築年'] <= map_age[1])
         ].copy()
         
-        if map_station != '指定なし': filtered_df = filtered_df[filtered_df['駅名'] == map_station]
+        if map_stations: filtered_df = filtered_df[filtered_df['駅名'].isin(map_stations)]
         if map_btype != '指定なし': filtered_df = filtered_df[filtered_df['建物種別_判定用'].str.contains(map_btype, na=False)]
+        
+        # 設備フィルター
         if m_2f: filtered_df = filtered_df[~filtered_df['階建'].str.match(r'^1階/|^1階$|地下', na=False)]
         if m_corner: filtered_df = filtered_df[filtered_df['設備'].str.contains('角住戸|角部屋', na=False) | filtered_df['備考'].str.contains('角住戸|角部屋', na=False)]
         if m_south: filtered_df = filtered_df[filtered_df['設備'].str.contains('南向き', na=False) | filtered_df['備考'].str.contains('南向き', na=False)]
@@ -704,12 +712,23 @@ with tab3:
         st.info(f"💡 条件に一致する物件: {len(filtered_df)} 件")
         
         if not filtered_df.empty:
-            st.markdown("### 📊 町丁目エリア別の平均相場リスト")
+            st.markdown("### 📊 町丁目エリア別の平均相場＆ボリュームゾーン")
             
+            # 💡 ボリュームゾーン計算用の関数
+            def calc_price_vz(x):
+                if len(x) < 3: return "-"
+                return f"{(x.quantile(0.333)/10000):.1f} 〜 {(x.quantile(0.667)/10000):.1f}"
+                
+            def calc_tanka_vz(x):
+                if len(x) < 3: return "-"
+                return f"{int(x.quantile(0.333)):,} 〜 {int(x.quantile(0.667)):,}"
+
             area_stats = filtered_df.groupby('住所').agg(
                 物件数=('物件名', 'count'),
                 平均価格_万円=(rent_col_map, lambda x: x.mean() / 10000),
+                価格ボリューム帯_万円=(rent_col_map, calc_price_vz), # 💡 追加！
                 平均平米単価_円=(tanka_col_map, 'mean'),
+                単価ボリューム帯_円=(tanka_col_map, calc_tanka_vz), # 💡 追加！
                 平均専有面積_m2=('専有面積_m2', 'mean'),
                 平均築年数_年=('築年', 'mean'),
                 平均駅徒歩_分=('徒歩分数', 'mean')
@@ -729,10 +748,10 @@ with tab3:
                     "平均築年数_年": "{:.1f}",
                     "平均駅徒歩_分": "{:.1f}"
                 })
-                st.write("※「平均㎡単価」が高い（割高な）エリアほど赤く、低い（割安な）エリアほど青く自動で色付けされます。")
+                st.write("※「平均㎡単価」が高い（割高な）エリアほど赤く、低い（割安な）エリアほど青く自動で色付けされます。データが少ない場合はボリューム帯に「-」が表示されます。")
                 st.dataframe(styled_stats, use_container_width=True, height=400)
             except ImportError:
-                st.warning("※ サーバーに色付け機能が未搭載のため、標準の表（色なし）で表示しています。色を付けるには requirements.txt に matplotlib を追加してください。")
+                st.warning("※ requirements.txt に matplotlib がないため色なしで表示しています。")
                 styled_stats = area_stats.style.format({
                     "平均価格_万円": "{:.1f}",
                     "平均㎡単価_円": "{:,.0f}",
@@ -752,7 +771,7 @@ with tab3:
             else:
                 display_df = filtered_df[filtered_df['住所'] == selected_area_for_list].copy()
             
-            display_cols = ['物件名', '住所', '間取り', '専有面積_m2', rent_col_map, tanka_col_map, '階建', '築年', '徒歩分数', 'URL']
+            display_cols = ['物件名', 'URL', '住所', '間取り', '専有面積_m2', rent_col_map, tanka_col_map, '階建', '築年', '徒歩分数']
             valid_cols = [c for c in display_cols if c in display_df.columns]
             
             display_df = display_df[valid_cols].sort_values(rent_col_map)
@@ -764,14 +783,16 @@ with tab3:
             if tanka_col_map in display_df.columns:
                 display_df['㎡単価(円)'] = display_df[tanka_col_map].astype(int).apply(lambda x: f"{x:,}")
             
-            final_cols = ['物件名', '住所', '間取り', '専有面積_m2', price_col_label, '㎡単価(円)', '階建', '築年', '徒歩分数', 'URL']
+            # 💡 表示列の並び順を調整（URLを物件名の直後に配置）
+            final_cols = ['物件名', 'URL', '住所', '間取り', '専有面積_m2', price_col_label, '㎡単価(円)', '階建', '築年', '徒歩分数']
             valid_final_cols = [c for c in final_cols if c in display_df.columns]
             
             display_df_clean = display_df[valid_final_cols]
             
             col_config = {}
             if "URL" in valid_final_cols:
-                col_config["URL"] = st.column_config.LinkColumn("物件リンク")
+                # 💡 URLの生の文字列を「🔗 詳細を見る」というクリックできるボタン風のリンクに変換！
+                col_config["URL"] = st.column_config.LinkColumn("物件リンク", display_text="🔗 詳細を見る")
                 
             st.dataframe(
                 display_df_clean,
