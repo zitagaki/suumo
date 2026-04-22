@@ -22,7 +22,7 @@ if 'scraping_log' not in st.session_state:
 st.title("🏡 不動産ハイブリッド査定システム (AI × プロの相場観)")
 
 # =========================================================
-# 2. スクレイピングエンジン
+# 2. スクレイピングエンジン (自動休憩タイマー搭載)
 # =========================================================
 def get_xpath_text(tree, xpath_str):
     try:
@@ -37,7 +37,7 @@ def get_xpath_text(tree, xpath_str):
     except Exception: pass
     return ""
 
-def scrape_suumo_list_incremental(base_url, start_page, max_pages, p_min, p_max, d_min, d_max):
+def scrape_suumo_list_incremental(base_url, start_page, max_pages, p_min, p_max, d_min, d_max, pause_every, pause_duration_min):
     session = requests.Session()
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -61,7 +61,18 @@ def scrape_suumo_list_incremental(base_url, start_page, max_pages, p_min, p_max,
     current_progress = 0
 
     for page in range(start_page, end_page):
-        # 💡 【重要】強制クラッシュ対策：通信を行う前に「記憶」に現在ページを刻み込む
+        # 💡 【追加機能】指定ページ数ごとの長時間インターバル（休憩）
+        if current_progress > 0 and current_progress % pause_every == 0:
+            tracker_box.warning(f"☕ **安全装置発動：{pause_every}ページ分の取得が完了したため、{pause_duration_min}分間の休憩に入ります...**\n\n※ブロック回避のための意図的な待機です。ブラウザを閉じずにお待ちください。")
+            
+            pause_sec = pause_duration_min * 60
+            countdown_text = st.empty()
+            for remaining in range(pause_sec, 0, -1):
+                mins, secs = divmod(remaining, 60)
+                countdown_text.markdown(f"### ⏳ 再開まであと **{mins}分 {secs}秒**")
+                time.sleep(1)
+            countdown_text.empty()
+
         st.session_state['scraping_log'] = f"⚠️ 【中断検知】前回の取得は【 {page} 】ページ目の途中で通信が強制切断（リセット）されました。\n✅ そこまでのデータは無事保存されています！次回は開始ページを「{page}」に設定して再開してください。"
         
         tracker_box.info(f"🔄 **現在【 {page} 】ページ目を処理しています...**\n\n※もしここで突然画面が初期状態に戻った場合は、裏で強制切断が起きています。次回は開始ページを「{page}」にして再開してください！")
@@ -249,7 +260,6 @@ def scrape_suumo_list_incremental(base_url, start_page, max_pages, p_min, p_max,
             tracker_box.error(st.session_state['scraping_log'])
             break
             
-    # 全て無事に終わった場合のみ、完了メッセージで「記憶（セッション）」を上書きする
     if not st.session_state['scraping_log'] or ("⚠️ 【中断検知】" in st.session_state['scraping_log']):
         st.session_state['scraping_log'] = f"✅ 指定された {start_page} ページ 〜 {end_page - 1} ページの処理がすべて完了しました！"
         tracker_box.success(st.session_state['scraping_log'])
@@ -372,7 +382,7 @@ with tab1:
         with col_p1:
             start_page = st.number_input("スクレイピング開始ページ（中断した場合はここを変更）", min_value=1, max_value=999, value=1)
         with col_p2:
-            max_pages = st.number_input("取得するページ数（開始ページから何ページ分か）", min_value=1, max_value=100, value=3)
+            max_pages = st.number_input("取得するページ数（開始ページから何ページ分か）", min_value=1, max_value=200, value=30)
         
         with st.expander("⚙️ スクレイピング待機時間の設定（ブロック対策）", expanded=False):
             col_w1, col_w2 = st.columns(2)
@@ -388,6 +398,15 @@ with tab1:
             p_min_actual, p_max_actual = min(p_min, p_max), max(p_min, p_max)
             d_min_actual, d_max_actual = min(d_min, d_max), max(d_min, d_max)
 
+            st.markdown("---")
+            # 💡 休憩タイマーのUIを追加
+            st.markdown("**▼ 長時間休憩（IPブロック回避の強力対策）**")
+            col_t1, col_t2 = st.columns(2)
+            with col_t1:
+                pause_every = st.number_input("何ページ取得するごとに休憩するか", min_value=1, max_value=100, value=10, step=1)
+            with col_t2:
+                pause_duration_min = st.number_input("休憩時間 (分)", min_value=1, max_value=60, value=11, step=1)
+
         col_btn, col_res = st.columns([1, 1])
         
         with col_btn:
@@ -398,7 +417,7 @@ with tab1:
                         
                     st.session_state['scraping_log'] = ""
                     with st.spinner("SUUMOから全物件の詳細データを自動収集しています..."):
-                        scrape_suumo_list_incremental(target_url, start_page, max_pages, p_min_actual, p_max_actual, d_min_actual, d_max_actual)
+                        scrape_suumo_list_incremental(target_url, start_page, max_pages, p_min_actual, p_max_actual, d_min_actual, d_max_actual, pause_every, pause_duration_min)
                 else:
                     st.warning("URLを入力してください。")
 
@@ -414,7 +433,6 @@ with tab1:
                     mime="application/vnd.ms-excel"
                 )
 
-        # 💡 クラッシュからの復旧時でも、常に最新のログ（何ページ目で止まったか）を表示する
         if 'scraping_log' in st.session_state and st.session_state['scraping_log']:
             if "❌" in st.session_state['scraping_log'] or "⚠️" in st.session_state['scraping_log']:
                 st.warning(st.session_state['scraping_log'])
@@ -630,7 +648,7 @@ with tab2:
             st.info("条件に一致するデータがないため、相場分布のメーターは表示されません。")
 
 # ---------------------------------------------------------
-# 💡 TAB 3: 町丁目ごとの相場ヒートマップ＆リスト化エンジン (リンク切れ対策・物件カルテ搭載版)
+# 💡 TAB 3: 町丁目ごとの相場ヒートマップ＆リスト化エンジン
 # ---------------------------------------------------------
 with tab3:
     if 'df_suumo' not in st.session_state:
@@ -764,14 +782,12 @@ with tab3:
             else:
                 display_df = filtered_df[filtered_df['住所'] == selected_area_for_list].copy()
             
-            # URL列名のブレを吸収
             url_cols = [c for c in display_df.columns if 'URL' in str(c).upper() or 'リンク' in str(c)]
             if url_cols and 'URL' not in display_df.columns:
                 display_df = display_df.rename(columns={url_cols[0]: 'URL'})
             
             display_df = display_df.sort_values(rent_col_map)
             
-            # 💡 表示用のクリーンな表を作成（元データのdisplay_dfはそのまま残す）
             display_df_clean = display_df.copy()
             price_col_label = '総家賃(万円)' if rent_col_map == '総家賃' else '家賃(万円)'
             
@@ -796,13 +812,9 @@ with tab3:
                 use_container_width=True
             )
 
-            # =========================================================
-            # 💡 追加：裏側に保持している「すべてのデータ」を見せる機能
-            # =========================================================
             st.markdown("<br>#### 🕵️ リンク切れ対策：物件の詳細カルテ", unsafe_allow_html=True)
             st.write("※SUUMOの掲載が終了してURLが見られなくなっても、取得時の全データをここで確認・ダウンロードできます。")
             
-            # ユニークな選択肢を作成（同じ物件名の重複を避けるため）
             display_df['セレクト用ラベル'] = display_df['物件名'] + "（" + display_df['階建'].astype(str) + " / " + display_df[rent_col_map].astype(str) + "円）"
             prop_options = ["選択してください"] + display_df['セレクト用ラベル'].tolist()
             
@@ -810,7 +822,6 @@ with tab3:
             with col_d1:
                 selected_prop_label = st.selectbox("詳細を確認したい物件を上のリストから選んでください", prop_options)
             with col_d2:
-                # 💡 指定エリアの「全項目」データダウンロード
                 buffer_area = io.BytesIO()
                 with pd.ExcelWriter(buffer_area, engine='xlsxwriter') as writer:
                     display_df.drop(columns=['セレクト用ラベル']).to_excel(writer, index=False)
@@ -821,7 +832,6 @@ with tab3:
                     mime="application/vnd.ms-excel"
                 )
                 
-            # 選ばれた物件の全データを表示
             if selected_prop_label != "選択してください":
                 prop_data = display_df[display_df['セレクト用ラベル'] == selected_prop_label].iloc[0]
                 
