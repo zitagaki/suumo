@@ -18,7 +18,6 @@ if 'raw_df' not in st.session_state:
     st.session_state['raw_df'] = pd.DataFrame()
 if 'scraping_log' not in st.session_state:
     st.session_state['scraping_log'] = ""
-# 💡 自動再開のための記憶領域を追加
 if 'current_target_url' not in st.session_state:
     st.session_state['current_target_url'] = ""
 if 'next_start_page' not in st.session_state:
@@ -31,7 +30,7 @@ if 'auto_resume_mode' not in st.session_state:
 st.title("🏡 不動産ハイブリッド査定システム (AI × プロの相場観)")
 
 # =========================================================
-# 2. スクレイピングエンジン (自動再開ナビゲーション搭載)
+# 2. スクレイピングエンジン (自動休憩 ＆ 自動再開ナビ搭載)
 # =========================================================
 def get_xpath_text(tree, xpath_str):
     try:
@@ -46,7 +45,7 @@ def get_xpath_text(tree, xpath_str):
     except Exception: pass
     return ""
 
-def scrape_suumo_list_incremental(base_url, start_page, max_pages, p_min, p_max, d_min, d_max):
+def scrape_suumo_list_incremental(base_url, start_page, max_pages, p_min, p_max, d_min, d_max, pause_every, pause_duration_min):
     session = requests.Session()
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -71,7 +70,19 @@ def scrape_suumo_list_incremental(base_url, start_page, max_pages, p_min, p_max,
     interrupted = False
 
     for page in range(start_page, end_page):
-        # 💡 通信を行う前に、もしここで止まった場合の「次の開始位置」を記憶しておく
+        # 💡 【復活】指定ページ数ごとの長時間インターバル（休憩）
+        if current_progress > 0 and current_progress % pause_every == 0:
+            tracker_box.warning(f"☕ **安全装置発動：{pause_every}ページ分の取得が完了したため、{pause_duration_min}分間の休憩に入ります...**\n\n※ブロック回避のための意図的な待機です。PCをスリープさせずにお待ちください。")
+            
+            pause_sec = pause_duration_min * 60
+            countdown_text = st.empty()
+            for remaining in range(pause_sec, 0, -1):
+                mins, secs = divmod(remaining, 60)
+                countdown_text.markdown(f"### ⏳ 再開まであと **{mins}分 {secs}秒**")
+                time.sleep(1)
+            countdown_text.empty()
+
+        # 中断時のための次ページ記憶
         st.session_state['next_start_page'] = page
         st.session_state['remaining_pages'] = end_page - page
         
@@ -99,7 +110,7 @@ def scrape_suumo_list_incremental(base_url, start_page, max_pages, p_min, p_max,
             if not items:
                 st.session_state['scraping_log'] = f"⚠️ {page}ページ目からデータが見つかりませんでした（最終ページの可能性があります）。"
                 tracker_box.warning(st.session_state['scraping_log'])
-                interrupted = True # これ以上進む必要がないので再開フラグは立てない
+                interrupted = True 
                 st.session_state['auto_resume_mode'] = False
                 break
                 
@@ -175,7 +186,7 @@ def scrape_suumo_list_incremental(base_url, start_page, max_pages, p_min, p_max,
                                 if not temp_df.empty:
                                     st.session_state['raw_df'] = pd.concat([st.session_state['raw_df'], temp_df]).drop_duplicates(subset=['物件名', '家賃', '共益費', '間取り', '専有面積', '階建'], keep='first')
                                 interrupted = True
-                                return # ここで関数を抜けるが、外側で再開処理をキャッチする
+                                return 
                                 
                             d_tree = lxml.html.fromstring(d_res.content)
                             
@@ -270,9 +281,8 @@ def scrape_suumo_list_incremental(base_url, start_page, max_pages, p_min, p_max,
     if not interrupted:
         st.session_state['scraping_log'] = f"✅ 指定された {start_page} ページ 〜 {end_page - 1} ページの処理がすべて完了しました！"
         tracker_box.success(st.session_state['scraping_log'])
-        st.session_state['auto_resume_mode'] = False # 完走したら再開モードをオフ
+        st.session_state['auto_resume_mode'] = False 
     else:
-        # 💡 中断された場合、再開モードをオンにして画面にボタンを出す準備をする
         st.session_state['auto_resume_mode'] = True
         
     status_text.empty()
@@ -389,11 +399,10 @@ with tab1:
     if data_source == "🌐 SUUMOのURLから自動取得 (スクレイピング)":
         target_url = st.text_input("SUUMOの検索結果URLを貼り付けてください", placeholder="https://suumo.jp/jj/chintai/ichiran/...")
         
-        # URLが入力されたら記憶しておく
         if target_url:
             st.session_state['current_target_url'] = target_url
             
-        # 💡 自動再開モードがONの時は、目立つように警告と再開ボタンを出す
+        # 💡 エラー時の「自動再開ボタン」
         if st.session_state['auto_resume_mode']:
             st.markdown(
                 f"""
@@ -408,7 +417,7 @@ with tab1:
                 unsafe_allow_html=True
             )
             
-            # 再開専用の巨大ボタン
+            # 再開ボタン（休憩設定の設定値を引き継いで再開）
             if st.button(f"🔄 【開始ページ: {st.session_state['next_start_page']}】から即座に再開する", type="primary", use_container_width=True):
                 st.session_state['scraping_log'] = ""
                 with st.spinner(f"{st.session_state['next_start_page']}ページ目から再開しています..."):
@@ -416,9 +425,14 @@ with tab1:
                         st.session_state['current_target_url'], 
                         st.session_state['next_start_page'], 
                         st.session_state['remaining_pages'], 
-                        1.0, 2.5, 3.0, 5.0 # ※ここは固定の安全値で再開
+                        st.session_state.get('ui_p_min', 1.0), 
+                        st.session_state.get('ui_p_max', 3.0), 
+                        st.session_state.get('ui_d_min', 1.0), 
+                        st.session_state.get('ui_d_max', 2.5),
+                        st.session_state.get('ui_pause_every', 10),
+                        st.session_state.get('ui_pause_duration', 11)
                     )
-                st.rerun() # 処理が終わったら画面をリロード
+                st.rerun() 
         
         st.markdown("---")
         
@@ -432,15 +446,24 @@ with tab1:
             col_w1, col_w2 = st.columns(2)
             with col_w1:
                 st.markdown("**▼ 1件取得（詳細ページ）ごとの待機**")
-                d_min = st.number_input("最短待機 (秒)", min_value=0.1, max_value=10.0, value=1.0, step=0.5)
-                d_max = st.number_input("最長待機 (秒)", min_value=0.1, max_value=15.0, value=2.5, step=0.5)
+                d_min = st.number_input("最短待機 (秒)", min_value=0.1, max_value=10.0, value=1.0, step=0.5, key="ui_d_min")
+                d_max = st.number_input("最長待機 (秒)", min_value=0.1, max_value=15.0, value=2.5, step=0.5, key="ui_d_max")
             with col_w2:
                 st.markdown("**▼ ページ遷移（次のページへ）の待機**")
-                p_min = st.number_input("最短待機 (秒)", min_value=1.0, max_value=30.0, value=3.0, step=1.0)
-                p_max = st.number_input("最長待機 (秒)", min_value=1.0, max_value=30.0, value=5.0, step=1.0)
+                p_min = st.number_input("最短待機 (秒)", min_value=1.0, max_value=30.0, value=3.0, step=1.0, key="ui_p_min")
+                p_max = st.number_input("最長待機 (秒)", min_value=1.0, max_value=30.0, value=5.0, step=1.0, key="ui_p_max")
                 
             p_min_actual, p_max_actual = min(p_min, p_max), max(p_min, p_max)
             d_min_actual, d_max_actual = min(d_min, d_max), max(d_min, d_max)
+
+            st.markdown("---")
+            # 💡 休憩タイマーのUIを復活
+            st.markdown("**▼ 長時間休憩（IPブロック回避の強力対策）**")
+            col_t1, col_t2 = st.columns(2)
+            with col_t1:
+                pause_every = st.number_input("何ページ取得するごとに休憩するか", min_value=1, max_value=100, value=10, step=1, key="ui_pause_every")
+            with col_t2:
+                pause_duration_min = st.number_input("休憩時間 (分)", min_value=1, max_value=60, value=11, step=1, key="ui_pause_duration")
 
         col_btn, col_res = st.columns([1, 1])
         
@@ -449,12 +472,12 @@ with tab1:
                 if target_url:
                     if start_page == 1:
                         st.session_state['raw_df'] = pd.DataFrame()
-                    st.session_state['auto_resume_mode'] = False # 手動でスタートしたら再開モードはリセット
+                    st.session_state['auto_resume_mode'] = False 
                     st.session_state['scraping_log'] = ""
                     with st.spinner("SUUMOから全物件の詳細データを自動収集しています..."):
-                        # ※タイマー機能は削除し、シンプルな進行に戻しました
-                        scrape_suumo_list_incremental(target_url, start_page, max_pages, p_min_actual, p_max_actual, d_min_actual, d_max_actual)
-                    st.rerun() # 処理後に画面をリロード
+                        # タイマーの値を渡して実行！
+                        scrape_suumo_list_incremental(target_url, start_page, max_pages, p_min_actual, p_max_actual, d_min_actual, d_max_actual, pause_every, pause_duration_min)
+                    st.rerun() 
                 else:
                     st.warning("URLを入力してください。")
 
@@ -472,7 +495,7 @@ with tab1:
 
         if 'scraping_log' in st.session_state and st.session_state['scraping_log']:
             if "❌" in st.session_state['scraping_log'] or "⚠️" in st.session_state['scraping_log']:
-                pass # 再開モードの赤いボックスが出ているのでここはスルー
+                pass 
             else:
                 st.success(st.session_state['scraping_log'])
 
